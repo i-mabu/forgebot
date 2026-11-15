@@ -11,7 +11,8 @@ export type DraftData =
   | { kind: "create"; blueprint: Blueprint }
   | { kind: "edit"; blueprint: Blueprint; originalName: string }
   | { kind: "delete"; name: string }
-  | { kind: "dataDelete" };
+  | { kind: "dataDelete" }
+  | { kind: "importChannel"; blueprint: Blueprint };
 
 export interface DraftSession {
   id: string;

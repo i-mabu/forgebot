@@ -9,6 +9,7 @@ import type { Store } from "./store.js";
 
 export type IntendedAction =
   | { type: "reply"; text: string }
+  | { type: "sendToChannel"; channelId: string; text: string }
   | {
       type: "incrementCounter";
       key: string;
@@ -32,6 +33,8 @@ export interface EngineContext {
   userId: string;
   userName: string;
   serverName: string;
+  messageUrl?: string;
+  reactionCount?: number;
 }
 
 export interface EngineDeps {
@@ -74,6 +77,24 @@ export function evaluateCondition(
 // 3. アクション実行
 // =================
 
+function renderActionTemplate(
+  template: string,
+  deps: EngineDeps,
+  ctx: EngineContext,
+): string {
+  return renderTemplate(template, {
+    user: ctx.userName,
+    server: ctx.serverName,
+    messageUrl: ctx.messageUrl,
+    reactionCount: ctx.reactionCount,
+    getCounter: (key) => deps.store.getCounter(ctx.guildId, key),
+    getVariable: (key) =>
+      deps.store.getVariable(ctx.guildId, "user", ctx.userId, key) ??
+      deps.store.getVariable(ctx.guildId, "guild", "", key),
+    rng: deps.rng,
+  });
+}
+
 function executeAction(
   action: Action,
   blueprint: Blueprint,
@@ -83,18 +104,20 @@ function executeAction(
   intended: IntendedAction[],
 ): void {
   if (action.type === "reply") {
-    const text = renderTemplate(action.template, {
-      user: ctx.userName,
-      server: ctx.serverName,
-      getCounter: (key) => deps.store.getCounter(ctx.guildId, key),
-      getVariable: (key) =>
-        deps.store.getVariable(ctx.guildId, "user", ctx.userId, key) ??
-        deps.store.getVariable(ctx.guildId, "guild", "", key),
-      rng: deps.rng,
-    });
+    const text = renderActionTemplate(action.template, deps, ctx);
     const rendered = (blueprint.presentation?.prefix ?? "") + text;
     outputs.push(rendered);
     intended.push({ type: "reply", text: rendered });
+    return;
+  }
+  if (action.type === "sendToChannel") {
+    const text = renderActionTemplate(action.template, deps, ctx);
+    const rendered = (blueprint.presentation?.prefix ?? "") + text;
+    intended.push({
+      type: "sendToChannel",
+      channelId: action.channelId,
+      text: rendered,
+    });
     return;
   }
   if (action.type === "incrementCounter") {

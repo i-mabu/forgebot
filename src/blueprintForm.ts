@@ -197,6 +197,8 @@ export function extractSimpleForm(
 export interface PreviewContext {
   user: string;
   server: string;
+  messageUrl?: string;
+  reactionCount?: number;
   getCounter: (key: string) => number;
 }
 
@@ -214,10 +216,12 @@ export function renderBlueprintPreview(
       offsets.set(action.key, (offsets.get(action.key) ?? 0) + amount);
       continue;
     }
-    if (action.type === "reply") {
+    if (action.type === "reply" || action.type === "sendToChannel") {
       const text = renderTemplate(action.template, {
         user: ctx.user,
         server: ctx.server,
+        messageUrl: ctx.messageUrl,
+        reactionCount: ctx.reactionCount,
         getCounter: (key) => ctx.getCounter(key) + (offsets.get(key) ?? 0),
         getVariable: () => null,
       });

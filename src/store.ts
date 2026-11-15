@@ -48,6 +48,15 @@ interface CountRow {
   n: number;
 }
 
+interface AutomationStateRow {
+  last_run_at: string;
+}
+
+interface ScheduledBlueprintRow {
+  guild_id: string;
+  definition: string;
+}
+
 // ===============
 // 2. スキーマ定義
 // ===============
@@ -81,6 +90,19 @@ CREATE TABLE IF NOT EXISTS counters (
   key TEXT NOT NULL,
   value INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (guild_id, key)
+);
+CREATE TABLE IF NOT EXISTS automation_fired (
+  guild_id TEXT NOT NULL,
+  blueprint_name TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  fired_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, blueprint_name, message_id)
+);
+CREATE TABLE IF NOT EXISTS automation_state (
+  guild_id TEXT NOT NULL,
+  blueprint_name TEXT NOT NULL,
+  last_run_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, blueprint_name)
 );
 `;
 
@@ -259,8 +281,73 @@ export class Store {
     return row === undefined ? 0 : row.value;
   }
 
+  // ===================
+  // 8. 自動化の状態管理
+  // ===================
+
+  hasAutomationFired(
+    guildId: string,
+    blueprintName: string,
+    messageId: string,
+  ): boolean {
+    const row = this.prepare(
+      "SELECT 1 AS n FROM automation_fired WHERE guild_id = ? AND blueprint_name = ? AND message_id = ?",
+    ).get(guildId, blueprintName, messageId) as CountRow | undefined;
+    return row !== undefined;
+  }
+
+  // 記録できた場合だけ true を返す。既に発火済みなら false。
+  markAutomationFired(
+    guildId: string,
+    blueprintName: string,
+    messageId: string,
+  ): boolean {
+    this.ensureGuild(guildId);
+    const result = this.prepare(
+      "INSERT OR IGNORE INTO automation_fired (guild_id, blueprint_name, message_id, fired_at) VALUES (?, ?, ?, ?)",
+    ).run(guildId, blueprintName, messageId, this.now());
+    return result.changes > 0;
+  }
+
+  getAutomationLastRun(guildId: string, blueprintName: string): Date | null {
+    const row = this.prepare(
+      "SELECT last_run_at FROM automation_state WHERE guild_id = ? AND blueprint_name = ?",
+    ).get(guildId, blueprintName) as AutomationStateRow | undefined;
+    return row === undefined ? null : new Date(row.last_run_at);
+  }
+
+  setAutomationLastRun(guildId: string, blueprintName: string, at: Date): void {
+    this.ensureGuild(guildId);
+    this.prepare(
+      `INSERT INTO automation_state (guild_id, blueprint_name, last_run_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT (guild_id, blueprint_name)
+       DO UPDATE SET last_run_at = excluded.last_run_at`,
+    ).run(guildId, blueprintName, at.toISOString());
+  }
+
+  listBlueprintsByTriggerType(
+    guildId: string,
+    triggerType: string,
+  ): Blueprint[] {
+    const rows = this.prepare(
+      "SELECT definition FROM blueprints WHERE guild_id = ? AND json_extract(definition, '$.trigger.type') = ? ORDER BY name",
+    ).all(guildId, triggerType) as unknown as BlueprintRow[];
+    return rows.map((row) => JSON.parse(row.definition) as Blueprint);
+  }
+
+  listScheduledBlueprints(): Array<{ guildId: string; blueprint: Blueprint }> {
+    const rows = this.prepare(
+      "SELECT guild_id, definition FROM blueprints WHERE json_extract(definition, '$.trigger.type') = 'schedule' ORDER BY guild_id, name",
+    ).all() as unknown as ScheduledBlueprintRow[];
+    return rows.map((row) => ({
+      guildId: row.guild_id,
+      blueprint: JSON.parse(row.definition) as Blueprint,
+    }));
+  }
+
   // =====================
-  // 8. 集計と書き出しと削除
+  // 9. 集計と書き出しと削除
   // =====================
 
   getCounts(guildId: string): GuildCounts {
@@ -314,6 +401,12 @@ export class Store {
       this.prepare("DELETE FROM blueprints WHERE guild_id = ?").run(guildId);
       this.prepare("DELETE FROM variables WHERE guild_id = ?").run(guildId);
       this.prepare("DELETE FROM counters WHERE guild_id = ?").run(guildId);
+      this.prepare("DELETE FROM automation_fired WHERE guild_id = ?").run(
+        guildId,
+      );
+      this.prepare("DELETE FROM automation_state WHERE guild_id = ?").run(
+        guildId,
+      );
       this.prepare("DELETE FROM guilds WHERE guild_id = ?").run(guildId);
       this.db.exec("COMMIT");
     } catch (error) {
@@ -322,9 +415,9 @@ export class Store {
     }
   }
 
-  // ==========
-  // 9. 終了処理
-  // ==========
+  // ===========
+  // 10. 終了処理
+  // ===========
 
   close(): void {
     if (this.closed) return;

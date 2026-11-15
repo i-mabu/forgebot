@@ -5,6 +5,8 @@
 export interface RenderContext {
   user: string;
   server: string;
+  messageUrl?: string;
+  reactionCount?: number;
   getCounter: (key: string) => number;
   getVariable?: (key: string) => string | null;
   rng?: () => number;
@@ -27,6 +29,10 @@ function resolvePlaceholder(raw: string, ctx: RenderContext): string {
   const rng = ctx.rng ?? Math.random;
   if (raw === "user") return ctx.user;
   if (raw === "server") return ctx.server;
+  if (raw === "messageUrl") return ctx.messageUrl ?? "";
+  if (raw === "reactionCount") {
+    return ctx.reactionCount === undefined ? "" : String(ctx.reactionCount);
+  }
   if (raw.startsWith("count:")) {
     const key = raw.slice("count:".length);
     if (key === "") throw new RenderError("{count:} requires a key");

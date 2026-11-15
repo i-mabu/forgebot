@@ -30,7 +30,7 @@ async function main(): Promise<void> {
   }
   const store = new Store(config.dbPath);
   const client = createClient();
-  attachHandlers(client, {
+  const handlers = attachHandlers(client, {
     store,
     cooldowns: new CooldownTracker(),
     drafts: new DraftStore(),
@@ -46,6 +46,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`Shutdown: ${signal}`);
+    handlers.stop();
     client.destroy();
     store.close();
     process.exit(0);

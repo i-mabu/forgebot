@@ -7,21 +7,41 @@ import {
   AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelSelectMenuBuilder,
+  ChannelType,
   Client,
   EmbedBuilder,
   Events,
   GatewayIntentBits,
   MessageFlags,
   ModalBuilder,
+  Partials,
+  PermissionFlagsBits,
   SlashCommandBuilder,
+  StringSelectMenuBuilder,
   TextInputBuilder,
   TextInputStyle,
   type AutocompleteInteraction,
   type ButtonInteraction,
+  type ChannelSelectMenuInteraction,
   type ChatInputCommandInteraction,
+  type MessageReaction,
   type ModalSubmitInteraction,
+  type PartialMessageReaction,
+  type PartialUser,
   type RESTPostAPIChatInputApplicationCommandsJSONBody,
+  type StringSelectMenuInteraction,
+  type User,
 } from "discord.js";
+import {
+  buildReactionBlueprint,
+  buildScheduleBlueprint,
+  extractAutomationForm,
+  getAutomationChannelId,
+  remapAutomationChannel,
+  type AutomationForm,
+  type ScheduleFormInput,
+} from "./automationForm.js";
 import { GRAPHITE, type Blueprint } from "./blueprint.js";
 import {
   buildBlueprintFromForm,
@@ -29,6 +49,7 @@ import {
   MAX_COUNTER_KEY_LENGTH,
   MAX_TEMPLATE_LENGTH,
   renderBlueprintPreview,
+  validateCommandName,
   type BlueprintFormInput,
 } from "./blueprintForm.js";
 import {
@@ -44,9 +65,16 @@ import {
   isDraftOwner,
   parseDraftCustomId,
 } from "./draft.js";
-import { executeBlueprint } from "./engine.js";
+import { executeBlueprint, type IntendedAction } from "./engine.js";
 import { hasManageGuild, MANAGE_GUILD_MISSING_MESSAGE } from "./permissions.js";
+import { matchesReactionTrigger, reactionCountFor } from "./reactionTrigger.js";
 import { RenderError } from "./render.js";
+import { isScheduleDue } from "./schedule.js";
+import {
+  decodeShareCode,
+  encodeShareCode,
+  ShareCodeError,
+} from "./shareCode.js";
 import type { Store } from "./store.js";
 
 export interface ClientDeps {
@@ -58,7 +86,16 @@ export interface ClientDeps {
 
 const MODAL_CREATE_ID = "forge:modal:create";
 const MODAL_EDIT_PREFIX = "forge:modal:edit:";
+const MODAL_AUTO_PREFIX = "forge:modal:auto:";
+const MODAL_AUTO_EDIT_PREFIX = "forge:modal:autoedit:";
+const MODAL_IMPORT_ID = "forge:modal:import";
+const SELECT_AUTO_TYPE_ID = "forge:auto:type";
+const SELECT_AUTO_CHANNEL_PREFIX = "forge:auto:channel:";
+const SELECT_IMPORT_CHANNEL_PREFIX = "forge:import:channel:";
 const LIST_DISPLAY_LIMIT = 50;
+const SHARE_CODE_INLINE_LIMIT = 1800;
+const SCHEDULER_INTERVAL_MS = 30_000;
+const MAX_MESSAGE_LENGTH = 2000;
 
 // =====================
 // 2. コマンド定義の構築
@@ -105,6 +142,31 @@ export function buildCommands(): RESTPostAPIChatInputApplicationCommandsJSONBody
     )
     .addSubcommandGroup((group) =>
       group
+        .setName("auto")
+        .setDescription("自動化を管理する")
+        .addSubcommand((sub) =>
+          sub.setName("create").setDescription("自動化を作成する"),
+        ),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("share")
+        .setDescription("Blueprint の共有コードを表示する")
+        .addStringOption((option) =>
+          option
+            .setName("name")
+            .setDescription("Blueprint の名前")
+            .setRequired(true)
+            .setAutocomplete(true),
+        ),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("import")
+        .setDescription("共有コードから Blueprint を読み込む"),
+    )
+    .addSubcommandGroup((group) =>
+      group
         .setName("data")
         .setDescription("サーバーのデータを管理する")
         .addSubcommand((sub) =>
@@ -134,9 +196,17 @@ export function buildCommands(): RESTPostAPIChatInputApplicationCommandsJSONBody
 // 3. クライアントの生成
 // =====================
 
-// Privileged Intent は使用しない。Slash コマンドに必要な Guilds のみ。
+// Privileged Intent は使用しない。Slash コマンドとリアクション検知に
+// 必要な非 Privileged な Intent のみを使う。
 export function createClient(): Client {
-  return new Client({ intents: [GatewayIntentBits.Guilds] });
+  return new Client({
+    intents: [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.GuildMessageReactions,
+    ],
+    partials: [Partials.Message, Partials.Reaction, Partials.User],
+  });
 }
 
 // ===================
@@ -144,7 +214,11 @@ export function createClient(): Client {
 // ===================
 
 type GuildInteraction =
-  ChatInputCommandInteraction | ModalSubmitInteraction | ButtonInteraction;
+  | ChatInputCommandInteraction
+  | ModalSubmitInteraction
+  | ButtonInteraction
+  | StringSelectMenuInteraction
+  | ChannelSelectMenuInteraction;
 
 async function requireManageGuild(
   interaction: GuildInteraction,
@@ -227,6 +301,164 @@ function buildDraftButtons(
   );
 }
 
+type AutomationTriggerType = "reaction" | "schedule";
+
+function textInput(
+  customId: string,
+  label: string,
+  style: TextInputStyle,
+  required: boolean,
+  initial?: string,
+  placeholder?: string,
+): TextInputBuilder {
+  const input = new TextInputBuilder()
+    .setCustomId(customId)
+    .setLabel(label)
+    .setStyle(style)
+    .setRequired(required);
+  if (initial !== undefined && initial !== "") input.setValue(initial);
+  if (placeholder !== undefined) input.setPlaceholder(placeholder);
+  return input;
+}
+
+function buildAutoModal(
+  customId: string,
+  triggerType: AutomationTriggerType,
+  initial?: AutomationForm,
+): ModalBuilder {
+  const nameInput = textInput(
+    "name",
+    "名前",
+    TextInputStyle.Short,
+    true,
+    initial?.input.name,
+  );
+  nameInput.setMaxLength(32);
+  const templateInput = textInput(
+    "template",
+    "送信テンプレート",
+    TextInputStyle.Paragraph,
+    true,
+    initial?.input.template,
+    "{messageUrl} が {reactionCount} 件のリアクションに達しました",
+  );
+  templateInput.setMaxLength(MAX_TEMPLATE_LENGTH);
+  const rows: ActionRowBuilder<TextInputBuilder>[] = [
+    new ActionRowBuilder<TextInputBuilder>().addComponents(nameInput),
+  ];
+  if (triggerType === "reaction") {
+    const reactionInitial =
+      initial !== undefined && initial.kind === "reaction"
+        ? initial.input
+        : undefined;
+    rows.push(
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        textInput(
+          "emoji",
+          "絵文字 (任意、空欄で全絵文字)",
+          TextInputStyle.Short,
+          false,
+          reactionInitial?.emoji,
+        ),
+      ),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        textInput(
+          "threshold",
+          "閾値 (リアクション数)",
+          TextInputStyle.Short,
+          true,
+          reactionInitial?.threshold,
+        ),
+      ),
+    );
+  } else {
+    const scheduleInitial =
+      initial !== undefined && initial.kind === "schedule"
+        ? initial.input
+        : undefined;
+    rows.push(
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        textInput(
+          "dailyTime",
+          "時刻 HH:MM (任意)",
+          TextInputStyle.Short,
+          false,
+          scheduleInitial?.dailyTime,
+          "09:00",
+        ),
+      ),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        textInput(
+          "interval",
+          "間隔 分 (任意)",
+          TextInputStyle.Short,
+          false,
+          scheduleInitial?.intervalMinutes,
+          "60",
+        ),
+      ),
+    );
+  }
+  rows.push(
+    new ActionRowBuilder<TextInputBuilder>().addComponents(templateInput),
+  );
+  return new ModalBuilder()
+    .setCustomId(customId)
+    .setTitle(
+      triggerType === "reaction" ? "リアクション自動化" : "スケジュール自動化",
+    )
+    .addComponents(...rows);
+}
+
+function buildImportModal(): ModalBuilder {
+  const codeInput = textInput(
+    "code",
+    "共有コード",
+    TextInputStyle.Paragraph,
+    true,
+  );
+  const nameInput = textInput(
+    "newName",
+    "新しい名前 (任意)",
+    TextInputStyle.Short,
+    false,
+  );
+  nameInput.setMaxLength(32);
+  return new ModalBuilder()
+    .setCustomId(MODAL_IMPORT_ID)
+    .setTitle("共有コードの読み込み")
+    .addComponents(
+      new ActionRowBuilder<TextInputBuilder>().addComponents(codeInput),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(nameInput),
+    );
+}
+
+function buildChannelSelectRow(
+  customId: string,
+): ActionRowBuilder<ChannelSelectMenuBuilder> {
+  return new ActionRowBuilder<ChannelSelectMenuBuilder>().addComponents(
+    new ChannelSelectMenuBuilder()
+      .setCustomId(customId)
+      .setPlaceholder("送信先チャンネル")
+      .setChannelTypes([ChannelType.GuildText, ChannelType.GuildAnnouncement])
+      .setMinValues(1)
+      .setMaxValues(1),
+  );
+}
+
+function describeTrigger(blueprint: Blueprint): string {
+  if (blueprint.trigger.type === "slash") return "slash";
+  if (blueprint.trigger.type === "reaction") return "reaction";
+  if (blueprint.trigger.type === "schedule") return "schedule";
+  return `event (${blueprint.trigger.event})`;
+}
+
+function displayBlueprintName(blueprint: Blueprint): string {
+  return blueprint.trigger.type === "slash"
+    ? `/${blueprint.name}`
+    : blueprint.name;
+}
+
 // ==========================
 // 6. /forge の各サブコマンド
 // ==========================
@@ -271,11 +503,7 @@ async function handleList(
   const lines = blueprints
     .slice(0, LIST_DISPLAY_LIMIT)
     .map((blueprint, index) => {
-      const trigger =
-        blueprint.trigger.type === "slash"
-          ? "slash"
-          : `event (${blueprint.trigger.event})`;
-      return `${index + 1}. /${blueprint.name}: ${trigger}, アクション ${blueprint.actions.length} 件`;
+      return `${index + 1}. ${displayBlueprintName(blueprint)}: ${describeTrigger(blueprint)}, アクション ${blueprint.actions.length} 件`;
     });
   if (blueprints.length > LIST_DISPLAY_LIMIT) {
     lines.push(`他 ${blueprints.length - LIST_DISPLAY_LIMIT} 件`);
@@ -322,6 +550,27 @@ async function handleEdit(
       content: `見つかりませんでした: /${name}`,
       flags: MessageFlags.Ephemeral,
     });
+    return;
+  }
+  if (
+    blueprint.trigger.type === "reaction" ||
+    blueprint.trigger.type === "schedule"
+  ) {
+    const form = extractAutomationForm(blueprint);
+    if (!form.ok) {
+      await interaction.reply({
+        content: form.message,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    await interaction.showModal(
+      buildAutoModal(
+        `${MODAL_AUTO_EDIT_PREFIX}${name}`,
+        blueprint.trigger.type,
+        form.value,
+      ),
+    );
     return;
   }
   const form = extractSimpleForm(blueprint);
@@ -374,38 +623,88 @@ async function handleDataDeleteCommand(
   });
 }
 
-// =====================
-// 7. モーダル送信の処理
-// =====================
+async function handleAutoCreateStart(
+  interaction: ChatInputCommandInteraction,
+): Promise<void> {
+  const select = new StringSelectMenuBuilder()
+    .setCustomId(SELECT_AUTO_TYPE_ID)
+    .setPlaceholder("Trigger の種別")
+    .addOptions(
+      {
+        label: "リアクション",
+        value: "reaction",
+        description: "リアクション数が閾値に達したら送信する",
+      },
+      {
+        label: "スケジュール",
+        value: "schedule",
+        description: "時刻または間隔で送信する",
+      },
+    );
+  await interaction.reply({
+    content: "Trigger の種別を選択してください",
+    components: [
+      new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select),
+    ],
+    flags: MessageFlags.Ephemeral,
+  });
+}
 
-async function handleModalSubmit(
-  interaction: ModalSubmitInteraction,
+async function handleShare(
+  interaction: ChatInputCommandInteraction,
   deps: ClientDeps,
 ): Promise<void> {
-  const isCreate = interaction.customId === MODAL_CREATE_ID;
-  const isEdit = interaction.customId.startsWith(MODAL_EDIT_PREFIX);
-  if (!isCreate && !isEdit) return;
-  if (!(await requireManageGuild(interaction))) return;
   const guildId = interaction.guildId ?? "";
-  const originalName = isEdit
-    ? interaction.customId.slice(MODAL_EDIT_PREFIX.length)
-    : null;
-  const built = buildBlueprintFromForm({
-    name: interaction.fields.getTextInputValue("name"),
-    template: interaction.fields.getTextInputValue("template"),
-    cooldown: interaction.fields.getTextInputValue("cooldown"),
-    counterKey: interaction.fields.getTextInputValue("counter"),
-  });
-  if (!built.ok) {
+  const name = interaction.options.getString("name", true);
+  const blueprint = deps.store.getBlueprint(guildId, name);
+  if (blueprint === null) {
     await interaction.reply({
-      content: built.message,
+      content: `見つかりませんでした: ${name}`,
       flags: MessageFlags.Ephemeral,
     });
     return;
   }
-  const blueprint = built.value;
+  const code = encodeShareCode(blueprint);
+  if (code.length <= SHARE_CODE_INLINE_LIMIT) {
+    await interaction.reply({
+      content: [`共有コード: ${blueprint.name}`, "```", code, "```"].join("\n"),
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  const attachment = new AttachmentBuilder(Buffer.from(code, "utf-8"), {
+    name: `forge-share-${blueprint.name}.txt`,
+  });
+  await interaction.reply({
+    content: `共有コード: ${blueprint.name} (ファイル添付)`,
+    files: [attachment],
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+async function handleImportCommand(
+  interaction: ChatInputCommandInteraction,
+): Promise<void> {
+  await interaction.showModal(buildImportModal());
+}
+
+// ===================
+// 7. プレビューの提示
+// ===================
+
+type PreviewInteraction = ModalSubmitInteraction | ChannelSelectMenuInteraction;
+
+// 保存前のプレビューと保存 / キャンセルボタンを提示する。
+// 保存するまでストアには書き込まない。
+async function presentBlueprintDraft(
+  interaction: PreviewInteraction,
+  deps: ClientDeps,
+  blueprint: Blueprint,
+  originalName: string | null,
+): Promise<void> {
+  const guildId = interaction.guildId ?? "";
   const check =
-    isEdit && originalName !== null
+    originalName !== null
       ? checkBlueprintReplacement(deps.store, guildId, originalName, blueprint)
       : checkBlueprintCreation(deps.store, guildId, blueprint);
   if (!check.ok) {
@@ -420,6 +719,9 @@ async function handleModalSubmit(
     preview = renderBlueprintPreview(blueprint, {
       user: interaction.user.username,
       server: interaction.guild?.name ?? "",
+      messageUrl: "(メッセージ URL)",
+      reactionCount:
+        blueprint.trigger.type === "reaction" ? blueprint.trigger.threshold : 0,
       getCounter: (key) => deps.store.getCounter(guildId, key),
     });
   } catch (error) {
@@ -436,14 +738,14 @@ async function handleModalSubmit(
   const session = deps.drafts.put(
     guildId,
     interaction.user.id,
-    isEdit && originalName !== null
+    originalName !== null
       ? { kind: "edit", blueprint, originalName }
       : { kind: "create", blueprint },
   );
   await interaction.reply({
     content: [
-      `Blueprint: /${blueprint.name}`,
-      "Trigger: slash",
+      `Blueprint: ${displayBlueprintName(blueprint)}`,
+      `Trigger: ${describeTrigger(blueprint)}`,
       `アクション: ${blueprint.actions.length} 件`,
       `クールダウン: ${blueprint.cooldownSeconds ?? 0} 秒`,
       "プレビュー:",
@@ -454,9 +756,241 @@ async function handleModalSubmit(
   });
 }
 
-// ===================
-// 8. 確認ボタンの処理
-// ===================
+// =====================
+// 8. モーダル送信の処理
+// =====================
+
+function buildAutoBlueprintFromModal(
+  interaction: ModalSubmitInteraction,
+  triggerType: AutomationTriggerType,
+  channelId: string,
+  timezone?: string,
+): ReturnType<typeof buildReactionBlueprint> {
+  if (triggerType === "reaction") {
+    return buildReactionBlueprint({
+      name: interaction.fields.getTextInputValue("name"),
+      emoji: interaction.fields.getTextInputValue("emoji"),
+      threshold: interaction.fields.getTextInputValue("threshold"),
+      channelId,
+      template: interaction.fields.getTextInputValue("template"),
+    });
+  }
+  const input: ScheduleFormInput = {
+    name: interaction.fields.getTextInputValue("name"),
+    dailyTime: interaction.fields.getTextInputValue("dailyTime"),
+    intervalMinutes: interaction.fields.getTextInputValue("interval"),
+    channelId,
+    template: interaction.fields.getTextInputValue("template"),
+  };
+  if (timezone !== undefined) input.timezone = timezone;
+  return buildScheduleBlueprint(input);
+}
+
+async function handleModalSubmit(
+  interaction: ModalSubmitInteraction,
+  deps: ClientDeps,
+): Promise<void> {
+  const customId = interaction.customId;
+  const isCreate = customId === MODAL_CREATE_ID;
+  const isEdit = customId.startsWith(MODAL_EDIT_PREFIX);
+  const isAuto = customId.startsWith(MODAL_AUTO_PREFIX);
+  const isAutoEdit = customId.startsWith(MODAL_AUTO_EDIT_PREFIX);
+  const isImport = customId === MODAL_IMPORT_ID;
+  if (!isCreate && !isEdit && !isAuto && !isAutoEdit && !isImport) return;
+  if (!(await requireManageGuild(interaction))) return;
+  const guildId = interaction.guildId ?? "";
+
+  if (isImport) {
+    let blueprint: Blueprint;
+    try {
+      blueprint = decodeShareCode(interaction.fields.getTextInputValue("code"));
+    } catch (error) {
+      if (error instanceof ShareCodeError) {
+        await interaction.reply({
+          content: error.message,
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+      throw error;
+    }
+    const newName = interaction.fields.getTextInputValue("newName").trim();
+    if (newName !== "") {
+      const validated = validateCommandName(newName);
+      if (!validated.ok) {
+        await interaction.reply({
+          content: validated.message,
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+      blueprint = {
+        ...blueprint,
+        name: validated.value,
+        trigger:
+          blueprint.trigger.type === "slash"
+            ? { type: "slash", command: validated.value }
+            : blueprint.trigger,
+      };
+    }
+    if (getAutomationChannelId(blueprint) !== null) {
+      const session = deps.drafts.put(guildId, interaction.user.id, {
+        kind: "importChannel",
+        blueprint,
+      });
+      await interaction.reply({
+        content: `送信先チャンネルを選択してください: ${blueprint.name}`,
+        components: [
+          buildChannelSelectRow(`${SELECT_IMPORT_CHANNEL_PREFIX}${session.id}`),
+        ],
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    await presentBlueprintDraft(interaction, deps, blueprint, null);
+    return;
+  }
+
+  if (isAuto || isAutoEdit) {
+    let triggerType: AutomationTriggerType;
+    let channelId: string;
+    let originalName: string | null = null;
+    let timezone: string | undefined;
+    if (isAuto) {
+      const rest = customId.slice(MODAL_AUTO_PREFIX.length);
+      const separator = rest.indexOf(":");
+      triggerType = rest.slice(0, separator) as AutomationTriggerType;
+      channelId = rest.slice(separator + 1);
+    } else {
+      originalName = customId.slice(MODAL_AUTO_EDIT_PREFIX.length);
+      const existing = deps.store.getBlueprint(guildId, originalName);
+      if (
+        existing === null ||
+        (existing.trigger.type !== "reaction" &&
+          existing.trigger.type !== "schedule")
+      ) {
+        await interaction.reply({
+          content: `見つかりませんでした: ${originalName}`,
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+      triggerType = existing.trigger.type;
+      channelId = existing.trigger.channelId;
+      if (existing.trigger.type === "schedule") {
+        timezone = existing.trigger.timezone;
+      }
+    }
+    const built = buildAutoBlueprintFromModal(
+      interaction,
+      triggerType,
+      channelId,
+      timezone,
+    );
+    if (!built.ok) {
+      await interaction.reply({
+        content: built.message,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    await presentBlueprintDraft(interaction, deps, built.value, originalName);
+    return;
+  }
+
+  const originalName = isEdit ? customId.slice(MODAL_EDIT_PREFIX.length) : null;
+  const built = buildBlueprintFromForm({
+    name: interaction.fields.getTextInputValue("name"),
+    template: interaction.fields.getTextInputValue("template"),
+    cooldown: interaction.fields.getTextInputValue("cooldown"),
+    counterKey: interaction.fields.getTextInputValue("counter"),
+  });
+  if (!built.ok) {
+    await interaction.reply({
+      content: built.message,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  await presentBlueprintDraft(interaction, deps, built.value, originalName);
+}
+
+// =====================
+// 9. 選択メニューの処理
+// =====================
+
+async function handleStringSelect(
+  interaction: StringSelectMenuInteraction,
+): Promise<void> {
+  if (interaction.customId !== SELECT_AUTO_TYPE_ID) return;
+  if (!(await requireManageGuild(interaction))) return;
+  const value = interaction.values[0];
+  if (value !== "reaction" && value !== "schedule") return;
+  await interaction.update({
+    content: "送信先チャンネルを選択してください",
+    components: [
+      buildChannelSelectRow(`${SELECT_AUTO_CHANNEL_PREFIX}${value}`),
+    ],
+  });
+}
+
+async function handleChannelSelect(
+  interaction: ChannelSelectMenuInteraction,
+  deps: ClientDeps,
+): Promise<void> {
+  const customId = interaction.customId;
+  if (customId.startsWith(SELECT_AUTO_CHANNEL_PREFIX)) {
+    if (!(await requireManageGuild(interaction))) return;
+    const triggerType = customId.slice(
+      SELECT_AUTO_CHANNEL_PREFIX.length,
+    ) as AutomationTriggerType;
+    const channelId = interaction.values[0];
+    if (channelId === undefined) return;
+    await interaction.showModal(
+      buildAutoModal(
+        `${MODAL_AUTO_PREFIX}${triggerType}:${channelId}`,
+        triggerType,
+      ),
+    );
+    return;
+  }
+  if (customId.startsWith(SELECT_IMPORT_CHANNEL_PREFIX)) {
+    const draftId = customId.slice(SELECT_IMPORT_CHANNEL_PREFIX.length);
+    const session = deps.drafts.get(draftId);
+    if (session === null) {
+      await interaction.reply({
+        content: "見つかりませんでした。確認の有効期限が切れています",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    const guildId = interaction.guildId ?? "";
+    if (!isDraftOwner(session, guildId, interaction.user.id)) {
+      await interaction.reply({
+        content: "実行できませんでした。作成者本人のみ操作できます",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    if (!(await requireManageGuild(interaction))) return;
+    const taken = deps.drafts.take(draftId);
+    if (taken === null || taken.data.kind !== "importChannel") {
+      await interaction.reply({
+        content: "見つかりませんでした。確認の有効期限が切れています",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    const channelId = interaction.values[0];
+    if (channelId === undefined) return;
+    const remapped = remapAutomationChannel(taken.data.blueprint, channelId);
+    await presentBlueprintDraft(interaction, deps, remapped, null);
+  }
+}
+
+// ====================
+// 10. 確認ボタンの処理
+// ====================
 
 async function handleDraftButton(
   interaction: ButtonInteraction,
@@ -529,6 +1063,13 @@ async function handleDraftButton(
     });
     return;
   }
+  if (data.kind === "importChannel") {
+    await interaction.update({
+      content: "実行できませんでした。送信先チャンネルが選択されていません",
+      components: [],
+    });
+    return;
+  }
   deps.store.deleteGuildData(guildId);
   await interaction.update({
     content: "削除しました: サーバーのデータ全件",
@@ -536,9 +1077,9 @@ async function handleDraftButton(
   });
 }
 
-// ===========================
-// 9. オートコンプリートの処理
-// ===========================
+// ============================
+// 11. オートコンプリートの処理
+// ============================
 
 async function handleAutocomplete(
   interaction: AutocompleteInteraction,
@@ -559,7 +1100,7 @@ async function handleAutocomplete(
 }
 
 // =================
-// 10. /c による実行
+// 12. /c による実行
 // =================
 
 async function handleRun(
@@ -613,13 +1154,226 @@ async function handleRun(
   await interaction.reply({ content: text });
 }
 
+// ======================
+// 13. チャンネルへの送信
+// ======================
+
+type SendToChannelAction = Extract<IntendedAction, { type: "sendToChannel" }>;
+
+// 送信先チャンネルの権限を確認してから送信する。
+// 送信できない場合は警告ログを出して false を返す。
+async function deliverToChannel(
+  client: Client,
+  guildId: string,
+  blueprint: Blueprint,
+  action: SendToChannelAction,
+): Promise<boolean> {
+  try {
+    const channel = await client.channels.fetch(action.channelId);
+    if (
+      channel === null ||
+      !channel.isTextBased() ||
+      channel.isDMBased() ||
+      !("send" in channel)
+    ) {
+      console.warn(
+        `Skipped send: channel ${action.channelId} is not a guild text channel`,
+      );
+      return false;
+    }
+    if (channel.guildId !== guildId) {
+      console.warn(
+        `Skipped send: channel ${action.channelId} is not in guild ${guildId}`,
+      );
+      return false;
+    }
+    const me =
+      channel.guild.members.me ?? (await channel.guild.members.fetchMe());
+    const permissions = channel.permissionsFor(me);
+    if (
+      permissions === null ||
+      !permissions.has([
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+      ])
+    ) {
+      console.warn(
+        `Skipped send: missing ViewChannel/SendMessages in channel ${action.channelId}`,
+      );
+      return false;
+    }
+    const text = action.text.slice(0, MAX_MESSAGE_LENGTH);
+    if (blueprint.presentation?.format === "embed") {
+      const embed = new EmbedBuilder()
+        .setDescription(text)
+        .setColor(blueprint.presentation.color ?? GRAPHITE);
+      await channel.send({ embeds: [embed] });
+    } else {
+      await channel.send({ content: text });
+    }
+    return true;
+  } catch (error) {
+    console.warn(`Failed to send to channel ${action.channelId}:`, error);
+    return false;
+  }
+}
+
+// ===============================
+// 14. リアクション Trigger の処理
+// ===============================
+
+async function handleReactionAdd(
+  client: Client,
+  deps: ClientDeps,
+  reaction: MessageReaction | PartialMessageReaction,
+  user: User | PartialUser,
+): Promise<void> {
+  try {
+    const fullUser = user.partial ? await user.fetch() : user;
+    if (fullUser.bot) return;
+    if (deps.globalDisabled) return;
+    if (reaction.partial) await reaction.fetch();
+    const message = reaction.message.partial
+      ? await reaction.message.fetch()
+      : reaction.message;
+    const guild = message.guild;
+    if (guild === null) return;
+    const guildId = guild.id;
+    if (deps.store.isGuildDisabled(guildId)) return;
+    const blueprints = deps.store.listBlueprintsByTriggerType(
+      guildId,
+      "reaction",
+    );
+    if (blueprints.length === 0) return;
+    const author = message.author;
+    if (author === null) return;
+    const emojiCounts: Record<string, number> = {};
+    let totalCount = 0;
+    for (const entry of message.reactions.cache.values()) {
+      const count = entry.count ?? 0;
+      totalCount += count;
+      const keys = new Set<string>();
+      keys.add(entry.emoji.toString());
+      if (entry.emoji.name !== null) keys.add(entry.emoji.name);
+      if (entry.emoji.id !== null) keys.add(entry.emoji.id);
+      for (const key of keys) {
+        if (key !== "") emojiCounts[key] = count;
+      }
+    }
+    for (const blueprint of blueprints) {
+      if (blueprint.trigger.type !== "reaction") continue;
+      const trigger = blueprint.trigger;
+      const input = {
+        emojiCounts,
+        totalCount,
+        alreadyFired: deps.store.hasAutomationFired(
+          guildId,
+          blueprint.name,
+          message.id,
+        ),
+      };
+      if (!matchesReactionTrigger(trigger, input)) continue;
+      const result = executeBlueprint(blueprint, deps, {
+        guildId,
+        userId: author.id,
+        userName: author.username,
+        serverName: guild.name,
+        messageUrl: message.url,
+        reactionCount: reactionCountFor(trigger, input),
+      });
+      if (result.status !== "ok") continue;
+      if (
+        !deps.store.markAutomationFired(guildId, blueprint.name, message.id)
+      ) {
+        continue;
+      }
+      for (const action of result.actions) {
+        if (action.type === "sendToChannel") {
+          await deliverToChannel(client, guildId, blueprint, action);
+        }
+      }
+    }
+  } catch (error) {
+    console.error("Reaction handling failed:", error);
+  }
+}
+
+// ================
+// 15. スケジューラ
+// ================
+
+export interface SchedulerHandle {
+  stop: () => void;
+}
+
+export function startScheduler(
+  client: Client,
+  deps: ClientDeps,
+): SchedulerHandle {
+  let ticking = false;
+  const tick = async (): Promise<void> => {
+    if (ticking) return;
+    ticking = true;
+    try {
+      if (deps.globalDisabled) return;
+      const now = new Date();
+      for (const {
+        guildId,
+        blueprint,
+      } of deps.store.listScheduledBlueprints()) {
+        if (blueprint.trigger.type !== "schedule") continue;
+        if (deps.store.isGuildDisabled(guildId)) continue;
+        const lastRun = deps.store.getAutomationLastRun(
+          guildId,
+          blueprint.name,
+        );
+        if (!isScheduleDue(blueprint.trigger, lastRun, now)) continue;
+        const guild = client.guilds.cache.get(guildId);
+        if (guild === undefined) continue;
+        const result = executeBlueprint(blueprint, deps, {
+          guildId,
+          userId: "",
+          userName: client.user?.username ?? "FORGE",
+          serverName: guild.name,
+        });
+        if (result.status !== "ok") continue;
+        deps.store.setAutomationLastRun(guildId, blueprint.name, now);
+        for (const action of result.actions) {
+          if (action.type === "sendToChannel") {
+            await deliverToChannel(client, guildId, blueprint, action);
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Scheduler tick failed:", error);
+    } finally {
+      ticking = false;
+    }
+  };
+  const timer = setInterval(() => {
+    void tick();
+  }, SCHEDULER_INTERVAL_MS);
+  timer.unref();
+  return {
+    stop: () => {
+      clearInterval(timer);
+    },
+  };
+}
+
 // ==============================
-// 11. インタラクションの振り分け
+// 16. インタラクションの振り分け
 // ==============================
 
-export function attachHandlers(client: Client, deps: ClientDeps): void {
+export function attachHandlers(
+  client: Client,
+  deps: ClientDeps,
+): SchedulerHandle {
   client.once(Events.ClientReady, (readyClient) => {
     console.log(`Ready: ${readyClient.user.tag}`);
+  });
+  client.on(Events.MessageReactionAdd, (reaction, user) => {
+    void handleReactionAdd(client, deps, reaction, user);
   });
   client.on(Events.InteractionCreate, async (interaction) => {
     try {
@@ -641,6 +1395,16 @@ export function attachHandlers(client: Client, deps: ClientDeps): void {
       if (interaction.isButton()) {
         if (interaction.guildId === null) return;
         await handleDraftButton(interaction, deps);
+        return;
+      }
+      if (interaction.isStringSelectMenu()) {
+        if (interaction.guildId === null) return;
+        await handleStringSelect(interaction);
+        return;
+      }
+      if (interaction.isChannelSelectMenu()) {
+        if (interaction.guildId === null) return;
+        await handleChannelSelect(interaction, deps);
         return;
       }
       if (!interaction.isChatInputCommand()) return;
@@ -667,10 +1431,16 @@ export function attachHandlers(client: Client, deps: ClientDeps): void {
           return;
         }
         if (!(await requireManageGuild(interaction))) return;
+        if (group === "auto") {
+          if (sub === "create") await handleAutoCreateStart(interaction);
+          return;
+        }
         if (sub === "create") await handleCreate(interaction);
         if (sub === "list") await handleList(interaction, deps);
         if (sub === "delete") await handleDeleteCommand(interaction, deps);
         if (sub === "edit") await handleEdit(interaction, deps);
+        if (sub === "share") await handleShare(interaction, deps);
+        if (sub === "import") await handleImportCommand(interaction);
         return;
       }
       if (interaction.commandName === "c") {
@@ -694,4 +1464,5 @@ export function attachHandlers(client: Client, deps: ClientDeps): void {
       }
     }
   });
+  return startScheduler(client, deps);
 }

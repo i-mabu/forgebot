@@ -2,8 +2,28 @@
 // 1. Blueprint の型定義
 // =====================
 
+export type ReactionTrigger = {
+  type: "reaction";
+  emoji?: string;
+  threshold: number;
+  channelId: string;
+  template: string;
+};
+
+export type ScheduleTrigger = {
+  type: "schedule";
+  intervalMinutes?: number;
+  dailyTime?: string;
+  timezone: string;
+  channelId: string;
+  template: string;
+};
+
 export type Trigger =
-  { type: "slash"; command: string } | { type: "event"; event: string };
+  | { type: "slash"; command: string }
+  | { type: "event"; event: string }
+  | ReactionTrigger
+  | ScheduleTrigger;
 
 export type Condition =
   | { type: "always" }
@@ -12,6 +32,7 @@ export type Condition =
 
 export type Action =
   | { type: "reply"; template: string }
+  | { type: "sendToChannel"; channelId: string; template: string }
   | { type: "incrementCounter"; key: string; amount?: number }
   | { type: "setVariable"; key: string; value: string };
 
@@ -38,10 +59,18 @@ export interface Blueprint {
 export const MAX_ACTIONS = 10;
 export const MAX_CONDITIONS = 10;
 export const MAX_BLUEPRINT_NAME_LENGTH = 32;
+export const MAX_REACTION_THRESHOLD = 1000;
+export const MAX_SCHEDULE_INTERVAL_MINUTES = 43200;
 export const GRAPHITE = 0x3a3f4a;
 
 const CONDITION_TYPES = new Set(["always", "variableEquals", "chance"]);
-const ACTION_TYPES = new Set(["reply", "incrementCounter", "setVariable"]);
+const ACTION_TYPES = new Set([
+  "reply",
+  "sendToChannel",
+  "incrementCounter",
+  "setVariable",
+]);
+const DAILY_TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 // =============
 // 3. 検証エラー
@@ -85,6 +114,87 @@ function validateTrigger(raw: unknown): Trigger {
     const event = requireKey(raw.event, "event", "event trigger");
     return { type: "event", event };
   }
+  if (raw.type === "reaction") {
+    const threshold = raw.threshold;
+    if (
+      typeof threshold !== "number" ||
+      !Number.isInteger(threshold) ||
+      threshold < 1 ||
+      threshold > MAX_REACTION_THRESHOLD
+    ) {
+      fail(
+        `reaction trigger requires an integer threshold between 1 and ${MAX_REACTION_THRESHOLD}`,
+      );
+    }
+    const channelId = requireKey(
+      raw.channelId,
+      "channelId",
+      "reaction trigger",
+    );
+    const template = requireKey(raw.template, "template", "reaction trigger");
+    const trigger: ReactionTrigger = {
+      type: "reaction",
+      threshold,
+      channelId,
+      template,
+    };
+    if (raw.emoji !== undefined) {
+      const emoji = requireKey(raw.emoji, "emoji", "reaction trigger");
+      trigger.emoji = emoji;
+    }
+    return trigger;
+  }
+  if (raw.type === "schedule") {
+    const channelId = requireKey(
+      raw.channelId,
+      "channelId",
+      "schedule trigger",
+    );
+    const template = requireKey(raw.template, "template", "schedule trigger");
+    const timezone = requireKey(raw.timezone, "timezone", "schedule trigger");
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: timezone });
+    } catch {
+      fail(`schedule trigger requires a valid timezone: ${timezone}`);
+    }
+    const hasDaily = raw.dailyTime !== undefined;
+    const hasInterval = raw.intervalMinutes !== undefined;
+    if (hasDaily === hasInterval) {
+      fail(
+        "schedule trigger requires exactly one of dailyTime or intervalMinutes",
+      );
+    }
+    const trigger: ScheduleTrigger = {
+      type: "schedule",
+      timezone,
+      channelId,
+      template,
+    };
+    if (hasDaily) {
+      if (
+        typeof raw.dailyTime !== "string" ||
+        !DAILY_TIME_PATTERN.test(raw.dailyTime)
+      ) {
+        fail('schedule trigger dailyTime must be in "HH:MM" format');
+      }
+      trigger.dailyTime = raw.dailyTime;
+    }
+    if (hasInterval) {
+      const interval = raw.intervalMinutes;
+      if (
+        typeof interval !== "number" ||
+        !Number.isInteger(interval) ||
+        interval < 1 ||
+        interval > MAX_SCHEDULE_INTERVAL_MINUTES
+      ) {
+        fail(
+          `schedule trigger requires an integer intervalMinutes between 1 and ${MAX_SCHEDULE_INTERVAL_MINUTES}`,
+        );
+      }
+      trigger.intervalMinutes = interval;
+    }
+    return trigger;
+  }
   fail(`Unknown trigger type: ${String(raw.type)}`);
 }
 
@@ -125,6 +235,19 @@ function validateAction(raw: unknown, index: number): Action {
   if (raw.type === "reply") {
     const template = requireKey(raw.template, "template", "reply action");
     return { type: "reply", template };
+  }
+  if (raw.type === "sendToChannel") {
+    const channelId = requireKey(
+      raw.channelId,
+      "channelId",
+      "sendToChannel action",
+    );
+    const template = requireKey(
+      raw.template,
+      "template",
+      "sendToChannel action",
+    );
+    return { type: "sendToChannel", channelId, template };
   }
   if (raw.type === "incrementCounter") {
     const key = requireKey(raw.key, "key", "incrementCounter action");
