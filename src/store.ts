@@ -160,6 +160,30 @@ export class Store {
     ).run(guildId, blueprint.name, JSON.stringify(blueprint), at, at);
   }
 
+  replaceBlueprint(
+    guildId: string,
+    originalName: string,
+    blueprint: Blueprint,
+  ): boolean {
+    this.db.exec("BEGIN");
+    try {
+      const existing = this.getBlueprint(guildId, originalName);
+      if (existing === null) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      if (originalName !== blueprint.name) {
+        this.deleteBlueprint(guildId, originalName);
+      }
+      this.upsertBlueprint(guildId, blueprint);
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   getBlueprint(guildId: string, name: string): Blueprint | null {
     const row = this.prepare(
       "SELECT definition FROM blueprints WHERE guild_id = ? AND name = ?",

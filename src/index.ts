@@ -7,6 +7,7 @@ import { dirname } from "node:path";
 import { attachHandlers, createClient } from "./client.js";
 import { ConfigError, loadConfig } from "./config.js";
 import { CooldownTracker } from "./cooldown.js";
+import { DraftStore } from "./draft.js";
 import { Store } from "./store.js";
 
 // ===========
@@ -32,6 +33,7 @@ async function main(): Promise<void> {
   attachHandlers(client, {
     store,
     cooldowns: new CooldownTracker(),
+    drafts: new DraftStore(),
     globalDisabled: config.disabled,
   });
 
