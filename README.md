@@ -1,7 +1,9 @@
 # FORGE
 
 ユーザーが自分でコマンドと自動化を作れる、公開前提の Discord Bot。
-Phase 2 はイベント Trigger の実行系と共有コードを実装している。
+イベント Trigger と共有コード、記憶と親密度、プラグインローダー、
+テンプレートギャラリーまで実装している。利用規約とプライバシー
+ポリシーは `docs/legal/` に正式版がある。
 
 ## 📋 概要
 
@@ -13,7 +15,7 @@ Blueprint = Trigger + Conditions + Actions + Presentation
 
 - カスタムコマンドは、Trigger が Slash の Blueprint である
 - 自動化は、Trigger がリアクション / スケジュールの Blueprint である
-- 開発者プラグインは、将来、新しいブロック種別を追加する形で統合する
+- 開発者プラグインは、新しいブロック種別を追加する形で統合する
 
 FORGE 本体は人格を持たない道具である。口調の演出はせず、表示形式
 （色・接頭辞・Embed 形式）だけを Presentation として扱う。
@@ -59,8 +61,8 @@ build.bat
 管理コマンドはすべてハンドラ側で `ManageGuild` 権限を再チェックし、
 DM では実行できない。
 
-- `/forge status` — Blueprint / Variable / Counter の件数と実行総数を
-  数字のみで表示する
+- `/forge status` — Blueprint / Variable / Counter の件数と実行総数、
+  承認済み記憶の件数、親密度の段階と稼働日数、有効プラグイン数を表示する
 - `/forge create` — モーダルで Blueprint を作成する（下記）
 - `/forge list` — そのギルドの Blueprint の一覧（名前・Trigger・
   アクション数）を表示する。自動化も Trigger 種別つきで含まれる
@@ -73,8 +75,23 @@ DM では実行できない。
   編集する。名前の補完候補が出る
 - `/forge delete <name>` — 確認ボタンの後に Blueprint を削除する。
   自動化も削除できる。名前の補完候補が出る
+- `/forge memory propose <key> <kind> <content>` — 記憶の候補を
+  登録する（種別は名言 / 記念日 / メモ）。候補は承認されるまで
+  テンプレートから参照できない
+- `/forge memory list [status]` — 記憶の一覧を承認状態つきで表示する
+- `/forge memory approve <key>` — 候補を承認する。承認済みの記憶は
+  テンプレートの `{memory:キー}` で参照できる
+- `/forge memory reject <key>` — 候補を却下する
+- `/forge memory delete <key>` — 記憶を削除する
+- `/forge plugin list` — 読み込まれたプラグインとギルドごとの
+  有効・無効を表示する
+- `/forge plugin enable <name>` / `/forge plugin disable <name>` —
+  そのギルドでプラグインを有効化 / 無効化する
+- `/forge template list` — 同梱の公式テンプレート集を表示する
+- `/forge template use <id> [name]` — テンプレートを Blueprint として
+  取り込む。自動化テンプレートは送信先チャンネルを選択し直す
 - `/forge data export` — そのギルドのデータ（Blueprint・変数・
-  カウンター）を JSON ファイルで書き出す
+  カウンター・記憶・成長・プラグイン有効化状態）を JSON ファイルで書き出す
 - `/forge data delete` — 確認ボタンの後に、そのギルドのデータを
   全件削除する
 - `/c <name>` — そのギルドの Blueprint を名前で引いて実行する
@@ -83,12 +100,12 @@ DM では実行できない。
 
 `/forge create` でモーダルが開く。入力項目は次の4つ。
 
-| 項目               | 内容                                                                          |
-| ------------------ | ----------------------------------------------------------------------------- |
-| コマンド名         | 1〜32 文字。小文字の文字・数字・ハイフン・アンダースコア（日本語可）          |
-| 返信テンプレート   | `{user}` `{server}` `{count:キー}` `{random:1-100}` `{choice:A,B}` 等が使える |
-| クールダウン（秒） | 任意。0〜86400 の整数                                                         |
-| カウンターキー     | 任意。指定すると実行のたびにそのカウンターを +1 してから描画する              |
+| 項目               | 内容                                                                                          |
+| ------------------ | --------------------------------------------------------------------------------------------- |
+| コマンド名         | 1〜32 文字。小文字の文字・数字・ハイフン・アンダースコア（日本語可）                          |
+| 返信テンプレート   | `{user}` `{server}` `{count:キー}` `{memory:キー}` `{random:1-100}` `{choice:A,B}` 等が使える |
+| クールダウン（秒） | 任意。0〜86400 の整数                                                                         |
+| カウンターキー     | 任意。指定すると実行のたびにそのカウンターを +1 してから描画する                              |
 
 送信すると、保存前に描画プレビュー（カウンターは加算後の値で表示、
 実データは変更しない）と「保存 / キャンセル」ボタンが出る。
@@ -163,12 +180,37 @@ npm run format    # Prettier で整形
 
 整形フックを使う場合は `git config core.hooksPath .githooks` を設定する。
 
+## 🧠 記憶と親密度
+
+管理者が `/forge memory propose` で候補を登録し、`/forge memory approve`
+で承認した記憶だけが保存され、テンプレートの `{memory:キー}` で参照できる。
+却下は `/forge memory reject`、削除は `/forge memory delete`。
+
+親密度は Blueprint の実行総数と稼働日数から段階（1〜5）を算出する
+純粋関数で決まり、`/forge status` に表示する。段階で基本機能を
+ロックすることはなく、表現のみに使う。
+
+## 🔌 プラグイン
+
+プラグインは新しい Condition / Action ブロックタイプの提供者である。
+`plugins/` 配下の各ディレクトリが1プラグインで、`manifest.json`
+（名前・提供ブロック種別・権限宣言）が必須、`index.mjs` がハンドラを
+提供する。プラグインの例外はブロック単位で隔離し、本体は落とさない。
+ギルドごとの有効化は `/forge plugin enable / disable` で管理する。
+サンプルとして `dice` プラグイン（条件 `diceAtLeast` / アクション
+`rollDice`）を同梱している。Blueprint では
+`{ "type": "plugin", "plugin": "dice", "block": "rollDice", "params": {} }`
+の形で使う。
+
+## 📚 テンプレートギャラリー
+
+公式テンプレート集は `templates/gallery.json` に同梱している。
+`/forge template list` で一覧し、`/forge template use <id>` で
+Blueprint として取り込む。
+
 ## 🚧 まだ実装していないもの
 
 - 参加 Trigger（Privileged Intent が必要なため見送り。上記参照）
-- 記憶の候補 → 承認フローと、親密度などの成長まわり
-- プラグインローダー
-- 利用規約・プライバシーポリシーは `docs/legal/` に下書きがある
 
 ## 👥 Contributors
 
