@@ -36,8 +36,9 @@ function err<T>(message: string): FormResult<T> {
 // 2. コマンド名の検証
 // ===================
 
-// Discord の Slash コマンド名: 1〜32 文字、小文字、
-// 使用できるのは文字・数字・ハイフン・アンダースコア。
+// Discord の Slash コマンド名: 1〜32 文字。
+// 使用できるのは文字・数字・ハイフン・アンダースコア（日本語可）。
+// 入力は検証前に小文字へ変換するので、大文字はエラーにせず小文字として扱う。
 const NAME_PATTERN = /^[-\p{L}\p{N}_]+$/u;
 
 export function validateCommandName(raw: string): FormResult<string> {

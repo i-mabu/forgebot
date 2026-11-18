@@ -1249,6 +1249,8 @@ async function handleReactionAdd(
     if (author === null) return;
     const emojiCounts: Record<string, number> = {};
     let totalCount = 0;
+    // 同じ件数を文字列表現・名前・ID の全キーで登録する。
+    // Trigger 側の絵文字指定がどの表記でも一致するようにするため。
     for (const entry of message.reactions.cache.values()) {
       const count = entry.count ?? 0;
       totalCount += count;
@@ -1282,6 +1284,8 @@ async function handleReactionAdd(
         reactionCount: reactionCountFor(trigger, input),
       });
       if (result.status !== "ok") continue;
+      // 送信前に発火を記録して先取りする。同時に届いたリアクションで
+      // 二重に送信しないよう、記録できなかった場合はここで止める。
       if (
         !deps.store.markAutomationFired(guildId, blueprint.name, message.id)
       ) {
@@ -1310,6 +1314,7 @@ export function startScheduler(
   client: Client,
   deps: ClientDeps,
 ): SchedulerHandle {
+  // 前回の tick が終わっていない間は重ねて実行しないためのガード。
   let ticking = false;
   const tick = async (): Promise<void> => {
     if (ticking) return;
@@ -1337,6 +1342,8 @@ export function startScheduler(
           serverName: guild.name,
         });
         if (result.status !== "ok") continue;
+        // 送信より先に最終実行時刻を記録する。送信の成否にかかわらず、
+        // 次回の tick や再起動で同じ回を二重に発火させないため。
         deps.store.setAutomationLastRun(guildId, blueprint.name, now);
         for (const action of result.actions) {
           if (action.type === "sendToChannel") {
@@ -1353,6 +1360,7 @@ export function startScheduler(
   const timer = setInterval(() => {
     void tick();
   }, SCHEDULER_INTERVAL_MS);
+  // タイマーだけでプロセスを生存させないよう参照を外す。
   timer.unref();
   return {
     stop: () => {

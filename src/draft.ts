@@ -69,6 +69,7 @@ export class DraftStore {
     return session;
   }
 
+  // 取得と同時に削除する。確認は1回限りで、同じドラフトを二重に確定できない。
   take(id: string): DraftSession | null {
     const session = this.get(id);
     if (session === null) return null;

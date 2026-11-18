@@ -11,6 +11,8 @@ export interface CooldownCheck {
 // 2. CooldownTracker クラス
 // =========================
 
+// check と record を分けている: 判定だけでは消費せず、
+// 実行が成功したときに呼び出し側 (engine) が record する。
 export class CooldownTracker {
   private readonly lastUsed = new Map<string, number>();
   private readonly now: () => number;

@@ -123,6 +123,7 @@ export class Store {
     this.db.exec(SCHEMA);
   }
 
+  // SQL 文字列ごとにコンパイル済みステートメントをキャッシュして再利用する。
   private prepare(sql: string): StatementSync {
     const cached = this.statements.get(sql);
     if (cached !== undefined) return cached;

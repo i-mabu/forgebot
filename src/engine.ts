@@ -58,6 +58,7 @@ export function evaluateCondition(
     const rng = deps.rng ?? Math.random;
     return rng() * 100 < condition.percent;
   }
+  // variableEquals はユーザー単位の値を優先し、無ければギルド単位へフォールバックする。
   const userValue = deps.store.getVariable(
     ctx.guildId,
     "user",

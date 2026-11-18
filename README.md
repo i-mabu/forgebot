@@ -3,7 +3,7 @@
 ユーザーが自分でコマンドと自動化を作れる、公開前提の Discord Bot。
 Phase 2 はイベント Trigger の実行系と共有コードを実装している。
 
-## 概要
+## 📋 概要
 
 FORGE の核は **Blueprint** という単一のデータ形式である。
 
@@ -18,7 +18,7 @@ Blueprint = Trigger + Conditions + Actions + Presentation
 FORGE 本体は人格を持たない道具である。口調の演出はせず、表示形式
 （色・接頭辞・Embed 形式）だけを Presentation として扱う。
 
-## セットアップ
+## 📦 セットアップ
 
 必要環境: Node.js 22 以上。
 
@@ -30,7 +30,7 @@ npm run build
 npm start
 ```
 
-### ビルド（ワンコマンド）
+### 🔨 ビルド（ワンコマンド）
 
 依存関係のインストール → 型チェック → ビルド → テストまでを 1 コマンドで
 実行するスクリプトを用意している。失敗した場合は、そのステップで止まって
@@ -54,7 +54,7 @@ build.bat
 | `FORGE_DISABLED`    | `1` / `true` で全ギルドの実行を停止する    |
 | `FORGE_DB_PATH`     | SQLite のパス（既定: `data/forge.sqlite`） |
 
-## コマンド
+## 🎮 コマンド
 
 管理コマンドはすべてハンドラ側で `ManageGuild` 権限を再チェックし、
 DM では実行できない。
@@ -79,7 +79,7 @@ DM では実行できない。
   全件削除する
 - `/c <name>` — そのギルドの Blueprint を名前で引いて実行する
 
-## Blueprint の作成
+## ✨ Blueprint の作成
 
 `/forge create` でモーダルが開く。入力項目は次の4つ。
 
@@ -96,7 +96,7 @@ DM では実行できない。
 10 分で失効し、作成した本人以外はボタンを操作できない。
 ギルドごとの Blueprint 上限は 100 件。
 
-## 自動化
+## 🤖 自動化
 
 `/forge auto create` で、Trigger 種別の選択 → 送信先チャンネルの
 選択 → モーダルの順に作成する。保存の流れは Blueprint 作成と同じ
@@ -115,7 +115,7 @@ DM では実行できない。
 検知には Privileged Intent の `GuildMembers` が必要で、FORGE は
 Privileged Intent を使用しない方針のため見送っている。
 
-## 共有コード
+## 🔗 共有コード
 
 `/forge share <name>` で Blueprint を共有コードとして表示する。
 
@@ -131,7 +131,7 @@ FORGE1-<チェックサム>-<gzip 圧縮した JSON の base64url>
 読み込み時に読み込み先ギルドのチャンネルを選択し直す（付け替えは
 必須）。Slash の Blueprint はそのままプレビュー → 保存の流れになる。
 
-## 設計の要約
+## 🏗️ 設計の要約
 
 - データは SQLite（Node 標準の `node:sqlite`）に保存し、全テーブルが
   `guild_id` を持つ。ギルド間のデータ分離をテストで保証している
@@ -144,7 +144,7 @@ FORGE1-<チェックサム>-<gzip 圧縮した JSON の base64url>
   いずれも非 Privileged な範囲に限定している。メッセージ本文は
   必要としない（リアクションの件数とメッセージ URL だけを使う）
 
-## 声のルール（要約）
+## 🗣️ 声のルール（要約）
 
 - 一人称を使わない。感情を表さない。挨拶をしない
 - 文は短く、1 メッセージ 1 事実。絵文字は使わない
@@ -153,7 +153,7 @@ FORGE1-<チェックサム>-<gzip 圧縮した JSON の base64url>
   （例: `作成しました: /{name}`、
   `実行できませんでした。権限が不足しています: {permission}`）
 
-## 開発
+## 🛠️ 開発
 
 ```sh
 npm test          # node:test による単体テスト
@@ -163,7 +163,7 @@ npm run format    # Prettier で整形
 
 整形フックを使う場合は `git config core.hooksPath .githooks` を設定する。
 
-## まだ実装していないもの
+## 🚧 まだ実装していないもの
 
 - 参加 Trigger（Privileged Intent が必要なため見送り。上記参照）
 - 記憶の候補 → 承認フローと、親密度などの成長まわり

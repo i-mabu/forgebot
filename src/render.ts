@@ -68,12 +68,14 @@ function resolvePlaceholder(raw: string, ctx: RenderContext): string {
     if (options.length === 0) {
       throw new RenderError("{choice:} requires at least one option");
     }
+    // rng() が 1 を返した場合に範囲外にならないよう上限で丸める。
     const index = Math.min(
       options.length - 1,
       Math.floor(rng() * options.length),
     );
     return options[index] ?? options[0]!;
   }
+  // 未知のプレースホルダはエラーにせず、元の表記のまま残す。
   return `{${raw}}`;
 }
 

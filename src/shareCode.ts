@@ -51,6 +51,7 @@ export function encodeShareCode(blueprint: Blueprint): string {
 // =================
 
 export function decodeShareCode(code: string): Blueprint {
+  // チャットやファイル経由で改行・空白が混ざって貼られても読めるよう先に除去する。
   const compact = code.replace(/\s+/g, "");
   if (!compact.startsWith(SHARE_CODE_PREFIX)) {
     throw new ShareCodeError(

@@ -57,6 +57,9 @@ function wallParts(timezone: string, date: Date): WallParts {
 }
 
 // そのタイムゾーンでの壁時計の日時に対応する UTC の瞬間を返す。
+// 変換は反復で求める: まず壁時計の日時を UTC とみなして仮の瞬間を作り、
+// その瞬間をタイムゾーンの壁時計へ戻した値との差で補正する。
+// 夏時間の切り替え前後でもずれないよう、差が 0 になるまで最大3回繰り返す。
 function wallToUtc(
   timezone: string,
   year: number,
