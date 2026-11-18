@@ -65,6 +65,7 @@ import {
   isDraftOwner,
   parseDraftCustomId,
 } from "./draft.js";
+import { buildAutoMemoryProposal } from "./autoMemory.js";
 import { executeBlueprint, type IntendedAction } from "./engine.js";
 import { getGalleryTemplate, listGalleryTemplates } from "./gallery.js";
 import { computeGrowthStage } from "./growth.js";
@@ -252,6 +253,20 @@ export function buildCommands(): RESTPostAPIChatInputApplicationCommandsJSONBody
                 .setDescription("キー")
                 .setRequired(true)
                 .setAutocomplete(true),
+            ),
+        )
+        .addSubcommand((sub) =>
+          sub
+            .setName("auto-enable")
+            .setDescription(
+              "リアクション閾値到達時の記憶の自動提案を有効化する",
+            ),
+        )
+        .addSubcommand((sub) =>
+          sub
+            .setName("auto-disable")
+            .setDescription(
+              "リアクション閾値到達時の記憶の自動提案を無効化する",
             ),
         ),
     )
@@ -732,6 +747,21 @@ async function handleMemoryDelete(
   const ok = deps.store.deleteMemory(guildId, key);
   await interaction.reply({
     content: ok ? `削除しました: ${key}` : `見つかりませんでした: ${key}`,
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+async function handleMemoryAutoSetEnabled(
+  interaction: ChatInputCommandInteraction,
+  deps: ClientDeps,
+  enabled: boolean,
+): Promise<void> {
+  const guildId = interaction.guildId ?? "";
+  deps.store.setAutoMemoryEnabled(guildId, enabled);
+  await interaction.reply({
+    content: enabled
+      ? "記憶の自動提案を有効化しました"
+      : "記憶の自動提案を無効化しました",
     flags: MessageFlags.Ephemeral,
   });
 }
@@ -1664,6 +1694,29 @@ async function deliverToChannel(
 // 14. リアクション Trigger の処理
 // ===============================
 
+// リアクション閾値に到達したメッセージを、記憶の候補として
+// 自動提案する。候補のキーはメッセージ ID から決定的に作られ、
+// Store 側で既存キーを上書きしないため、複数の Blueprint が
+// 同じメッセージで発火しても候補は1件だけ作られ、承認・却下
+// 済みの記憶が pending に戻ることもない。候補化の可否（Bot の
+// メッセージ・空本文・長すぎる本文）は buildAutoMemoryProposal
+// が判定し、ギルド単位の無効化は isAutoMemoryEnabled で尊重する。
+function proposeAutoMemory(
+  deps: ClientDeps,
+  guildId: string,
+  input: {
+    messageId: string;
+    authorId: string;
+    authorBot: boolean;
+    content: string;
+  },
+): void {
+  if (!deps.store.isAutoMemoryEnabled(guildId)) return;
+  const proposal = buildAutoMemoryProposal(input);
+  if (proposal === null) return;
+  deps.store.proposeMemoryIfAbsent(guildId, proposal);
+}
+
 async function handleReactionAdd(
   client: Client,
   deps: ClientDeps,
@@ -1745,6 +1798,15 @@ async function handleReactionAdd(
           await deliverToChannel(client, guildId, blueprint, action);
         }
       }
+      // 発火が確定したメッセージを記憶の候補として自動提案する。
+      // markAutomationFired を通過した発火でのみ呼ばれるため、
+      // 閾値到達前のリアクションで候補が作られることはない。
+      proposeAutoMemory(deps, guildId, {
+        messageId: message.id,
+        authorId: author.id,
+        authorBot: author.bot,
+        content: message.content,
+      });
     }
   } catch (error) {
     console.error("Reaction handling failed:", error);
@@ -1894,6 +1956,12 @@ export function attachHandlers(
           if (sub === "approve") await handleMemoryApprove(interaction, deps);
           if (sub === "reject") await handleMemoryReject(interaction, deps);
           if (sub === "delete") await handleMemoryDelete(interaction, deps);
+          if (sub === "auto-enable") {
+            await handleMemoryAutoSetEnabled(interaction, deps, true);
+          }
+          if (sub === "auto-disable") {
+            await handleMemoryAutoSetEnabled(interaction, deps, false);
+          }
           return;
         }
         if (group === "plugin") {

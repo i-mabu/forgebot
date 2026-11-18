@@ -83,6 +83,9 @@ DM では実行できない。
   テンプレートの `{memory:キー}` で参照できる
 - `/forge memory reject <key>` — 候補を却下する
 - `/forge memory delete <key>` — 記憶を削除する
+- `/forge memory auto-enable` / `/forge memory auto-disable` —
+  リアクション閾値到達時の記憶の自動提案を有効化 / 無効化する
+  （既定は有効）
 - `/forge plugin list` — 読み込まれたプラグインとギルドごとの
   有効・無効を表示する
 - `/forge plugin enable <name>` / `/forge plugin disable <name>` —
@@ -185,6 +188,12 @@ npm run format    # Prettier で整形
 管理者が `/forge memory propose` で候補を登録し、`/forge memory approve`
 で承認した記憶だけが保存され、テンプレートの `{memory:キー}` で参照できる。
 却下は `/forge memory reject`、削除は `/forge memory delete`。
+
+リアクション自動化が発火したメッセージは、本文がそのまま名言候補として
+自動提案もされる（キー `reaction-<メッセージID>`）。候補はメッセージごとに
+1件だけで、承認・却下済みの記憶が自動提案で上書きされることはない。
+Bot のメッセージ、本文が空のメッセージ、上限（500 文字）を超える本文は
+候補化されない。ギルド単位で止める場合は `/forge memory auto-disable`。
 
 親密度は Blueprint の実行総数と稼働日数から段階（1〜5）を算出する
 純粋関数で決まり、`/forge status` に表示する。段階で基本機能を

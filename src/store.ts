@@ -19,6 +19,7 @@ export interface GuildCounts {
 export interface GuildExport {
   guildId: string;
   disabled: boolean;
+  autoMemoryEnabled: boolean;
   executions: number;
   blueprints: Blueprint[];
   variables: Array<{
@@ -168,6 +169,13 @@ CREATE TABLE IF NOT EXISTS plugin_installs (
   updated_at TEXT NOT NULL,
   PRIMARY KEY (guild_id, plugin_name)
 );
+CREATE TABLE IF NOT EXISTS guild_settings (
+  guild_id TEXT NOT NULL,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, key)
+);
 `;
 
 function rowToMemory(row: MemoryRow): MemoryRecord {
@@ -278,6 +286,23 @@ export class Store {
       at,
     );
     return this.getMemory(guildId, input.key)!;
+  }
+
+  // 同じキーの記憶が既にある場合は何もせず null を返す。
+  // リアクションからの自動提案専用の経路で、proposeMemory の
+  // 上書き（承認済み・却下済みを pending に戻す）とは違い、
+  // 判定済みの記憶を自動提案が上書きしないことを保証する。
+  proposeMemoryIfAbsent(
+    guildId: string,
+    input: {
+      key: string;
+      kind: string;
+      content: string;
+      createdBy: string;
+    },
+  ): MemoryRecord | null {
+    if (this.getMemory(guildId, input.key) !== null) return null;
+    return this.proposeMemory(guildId, input);
   }
 
   getMemory(guildId: string, key: string): MemoryRecord | null {
@@ -410,6 +435,37 @@ export class Store {
       pluginName: row.plugin_name,
       enabled: row.enabled === 1,
     }));
+  }
+
+  // ====================
+  // 14. ギルド設定の保存
+  // ====================
+
+  private getGuildSetting(guildId: string, key: string): string | null {
+    const row = this.prepare(
+      "SELECT value FROM guild_settings WHERE guild_id = ? AND key = ?",
+    ).get(guildId, key) as { value: string } | undefined;
+    return row === undefined ? null : row.value;
+  }
+
+  private setGuildSetting(guildId: string, key: string, value: string): void {
+    this.ensureGuild(guildId);
+    this.prepare(
+      `INSERT INTO guild_settings (guild_id, key, value, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT (guild_id, key)
+       DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    ).run(guildId, key, value, this.now());
+  }
+
+  // リアクションからの記憶の自動提案は既定で有効。
+  // ギルド単位のオプトアウトだけを guild_settings に保存する。
+  setAutoMemoryEnabled(guildId: string, enabled: boolean): void {
+    this.setGuildSetting(guildId, "auto_memory_enabled", enabled ? "1" : "0");
+  }
+
+  isAutoMemoryEnabled(guildId: string): boolean {
+    return this.getGuildSetting(guildId, "auto_memory_enabled") !== "0";
   }
 
   // ====================
@@ -625,6 +681,7 @@ export class Store {
     return {
       guildId,
       disabled: this.isGuildDisabled(guildId),
+      autoMemoryEnabled: this.isAutoMemoryEnabled(guildId),
       executions: counts.executions,
       blueprints: this.listBlueprints(guildId),
       variables: variableRows.map((row) => ({
@@ -661,6 +718,9 @@ export class Store {
       this.prepare("DELETE FROM memories WHERE guild_id = ?").run(guildId);
       this.prepare("DELETE FROM growth WHERE guild_id = ?").run(guildId);
       this.prepare("DELETE FROM plugin_installs WHERE guild_id = ?").run(
+        guildId,
+      );
+      this.prepare("DELETE FROM guild_settings WHERE guild_id = ?").run(
         guildId,
       );
       this.prepare("DELETE FROM guilds WHERE guild_id = ?").run(guildId);
