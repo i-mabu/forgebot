@@ -4,7 +4,7 @@
   },
   "description": "FORGE — Blueprintで作る公開Discord Bot（Phase 1 土台）",
   "devDependencies": {
-    "@types/node": "^24.10.0",
+    "@types/node": "^26.6.6",
     "prettier": "^3.6.2",
     "tsx": "^4.20.6",
     "typescript": "^7.0.2"
