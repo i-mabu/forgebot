@@ -9,6 +9,7 @@ export interface RenderContext {
   reactionCount?: number;
   getCounter: (key: string) => number;
   getVariable?: (key: string) => string | null;
+  getMemory?: (key: string) => string | null;
   rng?: () => number;
 }
 
@@ -42,6 +43,11 @@ function resolvePlaceholder(raw: string, ctx: RenderContext): string {
     const key = raw.slice("var:".length);
     if (key === "") throw new RenderError("{var:} requires a key");
     return ctx.getVariable?.(key) ?? "";
+  }
+  if (raw.startsWith("memory:")) {
+    const key = raw.slice("memory:".length);
+    if (key === "") throw new RenderError("{memory:} requires a key");
+    return ctx.getMemory?.(key) ?? "";
   }
   if (raw.startsWith("random:")) {
     const parts = raw.slice("random:".length).split("-");

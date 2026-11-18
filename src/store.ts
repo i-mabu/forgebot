@@ -4,6 +4,8 @@
 
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import type { Blueprint } from "./blueprint.js";
+import type { GrowthRecord } from "./growth.js";
+import type { MemoryRecord, MemoryStatus } from "./memory.js";
 
 export type VariableScope = "guild" | "user" | "global";
 
@@ -26,6 +28,15 @@ export interface GuildExport {
     value: string;
   }>;
   counters: Array<{ key: string; value: number }>;
+  memories: MemoryRecord[];
+  growth: GrowthRecord | null;
+  pluginInstalls: Array<{ pluginName: string; enabled: boolean }>;
+}
+
+export interface PluginInstall {
+  guildId: string;
+  pluginName: string;
+  enabled: boolean;
 }
 
 interface BlueprintRow {
@@ -55,6 +66,31 @@ interface AutomationStateRow {
 interface ScheduledBlueprintRow {
   guild_id: string;
   definition: string;
+}
+
+interface MemoryRow {
+  guild_id: string;
+  key: string;
+  kind: string;
+  content: string;
+  status: MemoryStatus;
+  created_by: string;
+  approved_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface GrowthRow {
+  guild_id: string;
+  total_executions: number;
+  active_days: number;
+  last_active_date: string | null;
+  first_active_at: string | null;
+}
+
+interface PluginInstallRow {
+  plugin_name: string;
+  enabled: number;
 }
 
 // ===============
@@ -104,7 +140,49 @@ CREATE TABLE IF NOT EXISTS automation_state (
   last_run_at TEXT NOT NULL,
   PRIMARY KEY (guild_id, blueprint_name)
 );
+CREATE TABLE IF NOT EXISTS memories (
+  guild_id TEXT NOT NULL,
+  key TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  content TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_by TEXT NOT NULL DEFAULT '',
+  approved_by TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, key)
+);
+CREATE TABLE IF NOT EXISTS growth (
+  guild_id TEXT PRIMARY KEY,
+  total_executions INTEGER NOT NULL DEFAULT 0,
+  active_days INTEGER NOT NULL DEFAULT 0,
+  last_active_date TEXT,
+  first_active_at TEXT,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS plugin_installs (
+  guild_id TEXT NOT NULL,
+  plugin_name TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, plugin_name)
+);
 `;
+
+function rowToMemory(row: MemoryRow): MemoryRecord {
+  return {
+    guildId: row.guild_id,
+    key: row.key,
+    kind: row.kind,
+    content: row.content,
+    status: row.status,
+    createdBy: row.created_by,
+    approvedBy: row.approved_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
 
 // ===============
 // 3. Store クラス
@@ -163,9 +241,175 @@ export class Store {
 
   recordExecution(guildId: string): void {
     this.ensureGuild(guildId);
+    const at = this.now();
     this.prepare(
       "UPDATE guilds SET execution_count = execution_count + 1, updated_at = ? WHERE guild_id = ?",
-    ).run(this.now(), guildId);
+    ).run(at, guildId);
+    this.recordGrowthExecution(guildId, new Date(at));
+  }
+
+  // ==================
+  // 11. 記憶の保存
+  // ==================
+
+  proposeMemory(
+    guildId: string,
+    input: {
+      key: string;
+      kind: string;
+      content: string;
+      createdBy: string;
+    },
+  ): MemoryRecord {
+    this.ensureGuild(guildId);
+    const at = this.now();
+    this.prepare(
+      `INSERT INTO memories (guild_id, key, kind, content, status, created_by, approved_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'pending', ?, NULL, ?, ?)
+       ON CONFLICT (guild_id, key)
+       DO UPDATE SET kind = excluded.kind, content = excluded.content, status = 'pending', created_by = excluded.created_by, approved_by = NULL, updated_at = excluded.updated_at`,
+    ).run(
+      guildId,
+      input.key,
+      input.kind,
+      input.content,
+      input.createdBy,
+      at,
+      at,
+    );
+    return this.getMemory(guildId, input.key)!;
+  }
+
+  getMemory(guildId: string, key: string): MemoryRecord | null {
+    const row = this.prepare(
+      "SELECT guild_id, key, kind, content, status, created_by, approved_by, created_at, updated_at FROM memories WHERE guild_id = ? AND key = ?",
+    ).get(guildId, key) as MemoryRow | undefined;
+    return row === undefined ? null : rowToMemory(row);
+  }
+
+  getApprovedMemory(guildId: string, key: string): string | null {
+    const row = this.prepare(
+      "SELECT content FROM memories WHERE guild_id = ? AND key = ? AND status = 'approved'",
+    ).get(guildId, key) as { content: string } | undefined;
+    return row === undefined ? null : row.content;
+  }
+
+  listMemories(guildId: string, status?: MemoryStatus): MemoryRecord[] {
+    const rows =
+      status === undefined
+        ? (this.prepare(
+            "SELECT guild_id, key, kind, content, status, created_by, approved_by, created_at, updated_at FROM memories WHERE guild_id = ? ORDER BY key",
+          ).all(guildId) as unknown as MemoryRow[])
+        : (this.prepare(
+            "SELECT guild_id, key, kind, content, status, created_by, approved_by, created_at, updated_at FROM memories WHERE guild_id = ? AND status = ? ORDER BY key",
+          ).all(guildId, status) as unknown as MemoryRow[]);
+    return rows.map(rowToMemory);
+  }
+
+  approveMemory(guildId: string, key: string, approvedBy: string): boolean {
+    const result = this.prepare(
+      "UPDATE memories SET status = 'approved', approved_by = ?, updated_at = ? WHERE guild_id = ? AND key = ?",
+    ).run(approvedBy, this.now(), guildId, key);
+    return result.changes > 0;
+  }
+
+  rejectMemory(guildId: string, key: string): boolean {
+    const result = this.prepare(
+      "UPDATE memories SET status = 'rejected', approved_by = NULL, updated_at = ? WHERE guild_id = ? AND key = ?",
+    ).run(this.now(), guildId, key);
+    return result.changes > 0;
+  }
+
+  deleteMemory(guildId: string, key: string): boolean {
+    const result = this.prepare(
+      "DELETE FROM memories WHERE guild_id = ? AND key = ?",
+    ).run(guildId, key);
+    return result.changes > 0;
+  }
+
+  countMemories(guildId: string, status?: MemoryStatus): number {
+    const row =
+      status === undefined
+        ? (this.prepare(
+            "SELECT COUNT(*) AS n FROM memories WHERE guild_id = ?",
+          ).get(guildId) as CountRow | undefined)
+        : (this.prepare(
+            "SELECT COUNT(*) AS n FROM memories WHERE guild_id = ? AND status = ?",
+          ).get(guildId, status) as CountRow | undefined);
+    return row === undefined ? 0 : row.n;
+  }
+
+  // ==================
+  // 12. 成長の保存
+  // ==================
+
+  recordGrowthExecution(guildId: string, at: Date = new Date()): GrowthRecord {
+    this.ensureGuild(guildId);
+    const iso = at.toISOString();
+    const today = iso.slice(0, 10);
+    const existing = this.getGrowthRecord(guildId);
+    if (existing === null) {
+      this.prepare(
+        "INSERT INTO growth (guild_id, total_executions, active_days, last_active_date, first_active_at, updated_at) VALUES (?, 1, 1, ?, ?, ?)",
+      ).run(guildId, today, iso, iso);
+    } else {
+      const isNewDay = existing.lastActiveDate !== today;
+      this.prepare(
+        "UPDATE growth SET total_executions = total_executions + 1, active_days = active_days + ?, last_active_date = ?, updated_at = ? WHERE guild_id = ?",
+      ).run(isNewDay ? 1 : 0, today, iso, guildId);
+    }
+    return this.getGrowthRecord(guildId)!;
+  }
+
+  getGrowthRecord(guildId: string): GrowthRecord | null {
+    const row = this.prepare(
+      "SELECT guild_id, total_executions, active_days, last_active_date, first_active_at FROM growth WHERE guild_id = ?",
+    ).get(guildId) as GrowthRow | undefined;
+    if (row === undefined) return null;
+    return {
+      guildId: row.guild_id,
+      totalExecutions: row.total_executions,
+      activeDays: row.active_days,
+      lastActiveDate: row.last_active_date,
+      firstActiveAt: row.first_active_at,
+    };
+  }
+
+  // =======================
+  // 13. プラグイン有効化の保存
+  // =======================
+
+  setPluginEnabled(
+    guildId: string,
+    pluginName: string,
+    enabled: boolean,
+  ): void {
+    this.ensureGuild(guildId);
+    const at = this.now();
+    this.prepare(
+      `INSERT INTO plugin_installs (guild_id, plugin_name, enabled, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (guild_id, plugin_name)
+       DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at`,
+    ).run(guildId, pluginName, enabled ? 1 : 0, at, at);
+  }
+
+  isPluginEnabled(guildId: string, pluginName: string): boolean {
+    const row = this.prepare(
+      "SELECT enabled FROM plugin_installs WHERE guild_id = ? AND plugin_name = ?",
+    ).get(guildId, pluginName) as { enabled: number } | undefined;
+    return row !== undefined && row.enabled === 1;
+  }
+
+  listPluginInstalls(guildId: string): PluginInstall[] {
+    const rows = this.prepare(
+      "SELECT plugin_name, enabled FROM plugin_installs WHERE guild_id = ? ORDER BY plugin_name",
+    ).all(guildId) as unknown as PluginInstallRow[];
+    return rows.map((row) => ({
+      guildId,
+      pluginName: row.plugin_name,
+      enabled: row.enabled === 1,
+    }));
   }
 
   // ====================
@@ -393,6 +637,12 @@ export class Store {
         key: row.key,
         value: row.value,
       })),
+      memories: this.listMemories(guildId),
+      growth: this.getGrowthRecord(guildId),
+      pluginInstalls: this.listPluginInstalls(guildId).map((row) => ({
+        pluginName: row.pluginName,
+        enabled: row.enabled,
+      })),
     };
   }
 
@@ -406,6 +656,11 @@ export class Store {
         guildId,
       );
       this.prepare("DELETE FROM automation_state WHERE guild_id = ?").run(
+        guildId,
+      );
+      this.prepare("DELETE FROM memories WHERE guild_id = ?").run(guildId);
+      this.prepare("DELETE FROM growth WHERE guild_id = ?").run(guildId);
+      this.prepare("DELETE FROM plugin_installs WHERE guild_id = ?").run(
         guildId,
       );
       this.prepare("DELETE FROM guilds WHERE guild_id = ?").run(guildId);
