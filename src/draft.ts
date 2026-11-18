@@ -77,10 +77,6 @@ export class DraftStore {
     return session;
   }
 
-  remove(id: string): boolean {
-    return this.sessions.delete(id);
-  }
-
   prune(): number {
     const now = this.now();
     let removed = 0;

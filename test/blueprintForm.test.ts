@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { validateBlueprint } from "../src/blueprint.js";
+import { validateBlueprint, type Blueprint } from "../src/blueprint.js";
 import {
   buildBlueprintFromForm,
   extractSimpleForm,
@@ -185,12 +185,14 @@ test("条件付き Blueprint はフォームへ復元できない", () => {
 });
 
 test("イベント Trigger はフォームへ復元できない", () => {
-  const blueprint = validateBlueprint({
+  // event Trigger は検証では弾かれるため、保存済みデータ相当の
+  // オブジェクトを直接組み立てて復元可否だけを見る。
+  const blueprint: Blueprint = {
     name: "evt",
     trigger: { type: "event", event: "guildMemberAdd" },
     conditions: [{ type: "always" }],
     actions: [{ type: "reply", template: "x" }],
-  });
+  };
   assert.equal(extractSimpleForm(blueprint).ok, false);
 });
 

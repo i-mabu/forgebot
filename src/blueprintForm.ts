@@ -4,6 +4,7 @@
 
 import {
   BlueprintValidationError,
+  MAX_COOLDOWN_SECONDS,
   validateBlueprint,
   type Action,
   type Blueprint,
@@ -11,7 +12,8 @@ import {
 import { renderTemplate } from "./render.js";
 
 export const MAX_TEMPLATE_LENGTH = 2000;
-export const MAX_COOLDOWN_SECONDS = 86400;
+// クールダウンの上限は Blueprint 検証側 (blueprint.ts) と共通の定数を使う。
+export { MAX_COOLDOWN_SECONDS } from "./blueprint.js";
 export const MAX_COUNTER_KEY_LENGTH = 32;
 
 export interface BlueprintFormInput {

@@ -111,3 +111,18 @@ test("不正な Blueprint を含むコードは拒否される", () => {
   });
   assert.throws(() => decodeShareCode(code), ShareCodeError);
 });
+
+test("展開後に上限を超えるコードは拒否される", () => {
+  // 圧縮率は高いが展開すると 1 MiB を超えるペイロード（zip bomb 的入力）。
+  const code = craftCode({
+    version: 1,
+    blueprint: slashBlueprint(),
+    padding: "x".repeat(2 * 1024 * 1024),
+  });
+  assert.throws(
+    () => decodeShareCode(code),
+    (error: unknown) =>
+      error instanceof ShareCodeError &&
+      /展開できませんでした/.test(error.message),
+  );
+});

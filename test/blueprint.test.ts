@@ -100,3 +100,40 @@ test("負のクールダウンを拒否する", () => {
     /cooldownSeconds/,
   );
 });
+
+test("非整数・上限超えのクールダウンを拒否する", () => {
+  assert.throws(
+    () => validateBlueprint(base({ cooldownSeconds: 1.5 })),
+    /cooldownSeconds/,
+  );
+  assert.throws(
+    () => validateBlueprint(base({ cooldownSeconds: 86401 })),
+    /cooldownSeconds/,
+  );
+  // フォーム経路と同じ上限 (86400) ちょうどは受け付ける。
+  const blueprint = validateBlueprint(base({ cooldownSeconds: 86400 }));
+  assert.equal(blueprint.cooldownSeconds, 86400);
+});
+
+test("event トリガーは未対応として拒否する", () => {
+  assert.throws(
+    () =>
+      validateBlueprint(
+        base({ trigger: { type: "event", event: "guildMemberAdd" } }),
+      ),
+    /event trigger is not supported yet/,
+  );
+});
+
+test("カウンター加算量の範囲外を拒否する", () => {
+  const withAmount = (amount: number) =>
+    base({
+      actions: [{ type: "incrementCounter", key: "visits", amount }],
+    });
+  assert.throws(() => validateBlueprint(withAmount(0)), /amount/);
+  assert.throws(() => validateBlueprint(withAmount(1001)), /amount/);
+  assert.throws(() => validateBlueprint(withAmount(-1001)), /amount/);
+  // 範囲の両端（負数 = 減算も含む）は受け付ける。
+  assert.equal(validateBlueprint(withAmount(1000)).actions.length, 1);
+  assert.equal(validateBlueprint(withAmount(-1000)).actions.length, 1);
+});

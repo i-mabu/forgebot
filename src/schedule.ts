@@ -149,9 +149,9 @@ export function nextDailyOccurrence(
   return occurrenceOnWallDate(trigger, next.year, next.month, next.day);
 }
 
-// =====================
-// 4. 実行判定と次回実行
-// =====================
+// =============
+// 4. 実行判定
+// =============
 
 export function isScheduleDue(
   trigger: ScheduleTrigger,
@@ -167,18 +167,4 @@ export function isScheduleDue(
   if (lastRunAt === null) return true;
   const occurrence = lastDailyOccurrence(trigger, now);
   return lastRunAt.getTime() < occurrence.getTime();
-}
-
-export function nextScheduleRun(
-  trigger: ScheduleTrigger,
-  lastRunAt: Date | null,
-  now: Date,
-): Date {
-  if (trigger.intervalMinutes !== undefined) {
-    if (lastRunAt === null) return new Date(now.getTime());
-    return new Date(lastRunAt.getTime() + trigger.intervalMinutes * 60_000);
-  }
-  const base =
-    lastRunAt !== null && lastRunAt.getTime() > now.getTime() ? lastRunAt : now;
-  return nextDailyOccurrence(trigger, base);
 }

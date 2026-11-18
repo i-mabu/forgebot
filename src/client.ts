@@ -1070,9 +1070,19 @@ async function handleDraftButton(
     });
     return;
   }
-  deps.store.deleteGuildData(guildId);
+  if (data.kind === "dataDelete") {
+    deps.store.deleteGuildData(guildId);
+    await interaction.update({
+      content: "削除しました: サーバーのデータ全件",
+      components: [],
+    });
+    return;
+  }
+  // 未知の draft 種別はデータを変更せずエラー表示で終わる。
+  // 将来種別を追加したときに、誤ってデータ全件削除へ
+  // フォールスルーしないためのデフォルト分岐。
   await interaction.update({
-    content: "削除しました: サーバーのデータ全件",
+    content: "実行できませんでした。不明な確認種別です",
     components: [],
   });
 }
@@ -1136,9 +1146,23 @@ async function handleRun(
     });
     return;
   }
-  if (result.status === "skipped" || result.outputs.length === 0) {
+  if (result.status === "skipped") {
     await interaction.reply({
       content: "実行されませんでした。条件を満たしていません",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  // /forge run が実行するのは返信アクションだけ。チャンネル送信
+  // アクションは実行されないため、黙って捨てず返信で知らせる。
+  const channelNote = result.actions.some(
+    (action) => action.type === "sendToChannel",
+  )
+    ? "※ チャンネルへの送信は /forge run では実行されません"
+    : null;
+  if (result.outputs.length === 0) {
+    await interaction.reply({
+      content: channelNote ?? "実行されませんでした。条件を満たしていません",
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -1148,10 +1172,15 @@ async function handleRun(
     const embed = new EmbedBuilder()
       .setDescription(text)
       .setColor(blueprint.presentation.color ?? GRAPHITE);
-    await interaction.reply({ embeds: [embed] });
+    await interaction.reply({
+      ...(channelNote !== null ? { content: channelNote } : {}),
+      embeds: [embed],
+    });
     return;
   }
-  await interaction.reply({ content: text });
+  await interaction.reply({
+    content: channelNote !== null ? `${text}\n${channelNote}` : text,
+  });
 }
 
 // ======================
@@ -1286,6 +1315,9 @@ async function handleReactionAdd(
       if (result.status !== "ok") continue;
       // 送信前に発火を記録して先取りする。同時に届いたリアクションで
       // 二重に送信しないよう、記録できなかった場合はここで止める。
+      // 照合（hasAutomationFired）→実行→記録の間に await は無く
+      // 同期的に完了するため、カウンターや変数といった送信以外の
+      // 副作用も二重に適用されることはない。
       if (
         !deps.store.markAutomationFired(guildId, blueprint.name, message.id)
       ) {

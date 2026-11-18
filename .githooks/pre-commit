@@ -1,6 +1,10 @@
 #!/bin/sh
-# コミット前に整形を適用し、整形漏れがあればコミットを止める
+# コミット前に、ステージされたファイルだけを整形して再ステージする。
+# ワークツリー全体を整形すると、無関係な未ステージ変更まで
+# 巻き込んでしまうため対象をステージ済みに絞る。
 set -eu
 cd "$(git rev-parse --show-toplevel)"
-npx prettier --write .
-git add -u
+# 対象はステージ済みの追加・変更・コピー（削除は除く）。
+# --ignore-unknown で Prettier が扱えないファイルは読み飛ばす。
+git diff --cached --name-only --diff-filter=ACM -z | xargs -0 -r npx prettier --write --ignore-unknown
+git diff --cached --name-only --diff-filter=ACM -z | xargs -0 -r git add --

@@ -61,6 +61,9 @@ export const MAX_CONDITIONS = 10;
 export const MAX_BLUEPRINT_NAME_LENGTH = 32;
 export const MAX_REACTION_THRESHOLD = 1000;
 export const MAX_SCHEDULE_INTERVAL_MINUTES = 43200;
+// インポート経路の検証もフォーム経路 (blueprintForm) と同じ上限に揃える。
+export const MAX_COOLDOWN_SECONDS = 86400;
+export const MAX_COUNTER_AMOUNT = 1000;
 export const GRAPHITE = 0x3a3f4a;
 
 const CONDITION_TYPES = new Set(["always", "variableEquals", "chance"]);
@@ -111,8 +114,10 @@ function validateTrigger(raw: unknown): Trigger {
     return { type: "slash", command };
   }
   if (raw.type === "event") {
-    const event = requireKey(raw.event, "event", "event trigger");
-    return { type: "event", event };
+    // event Trigger（メンバー参加など）は未実装で、保存しても
+    // どこでも実行されない。無言で無効な Blueprint が出来てしまう
+    // ため、検証の時点で弾く。
+    fail("event trigger is not supported yet");
   }
   if (raw.type === "reaction") {
     const threshold = raw.threshold;
@@ -252,8 +257,16 @@ function validateAction(raw: unknown, index: number): Action {
   if (raw.type === "incrementCounter") {
     const key = requireKey(raw.key, "key", "incrementCounter action");
     const amount = raw.amount ?? 1;
-    if (typeof amount !== "number" || !Number.isInteger(amount)) {
-      fail("incrementCounter action requires an integer amount");
+    if (
+      typeof amount !== "number" ||
+      !Number.isInteger(amount) ||
+      amount === 0 ||
+      amount < -MAX_COUNTER_AMOUNT ||
+      amount > MAX_COUNTER_AMOUNT
+    ) {
+      fail(
+        `incrementCounter action requires an integer amount between -${MAX_COUNTER_AMOUNT} and ${MAX_COUNTER_AMOUNT} (excluding 0)`,
+      );
     }
     return { type: "incrementCounter", key, amount };
   }
@@ -346,10 +359,13 @@ export function validateBlueprint(input: unknown): Blueprint {
     const cooldown = input.cooldownSeconds;
     if (
       typeof cooldown !== "number" ||
-      !Number.isFinite(cooldown) ||
-      cooldown < 0
+      !Number.isInteger(cooldown) ||
+      cooldown < 0 ||
+      cooldown > MAX_COOLDOWN_SECONDS
     ) {
-      fail("Blueprint cooldownSeconds must be a non-negative number");
+      fail(
+        `Blueprint cooldownSeconds must be an integer between 0 and ${MAX_COOLDOWN_SECONDS}`,
+      );
     }
     blueprint.cooldownSeconds = cooldown;
   }

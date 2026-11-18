@@ -6,7 +6,6 @@ import {
   isValidTimezone,
   lastDailyOccurrence,
   nextDailyOccurrence,
-  nextScheduleRun,
   parseDailyTime,
 } from "../src/schedule.js";
 
@@ -66,16 +65,6 @@ test("間隔スケジュールは前回実行から間隔が経つまで対象�
   );
 });
 
-test("nextScheduleRun は間隔スケジュールの次回を返す", () => {
-  const trigger = intervalTrigger(60);
-  const now = new Date("2026-01-01T12:00:00Z");
-  assert.deepEqual(nextScheduleRun(trigger, null, now), now);
-  assert.deepEqual(
-    nextScheduleRun(trigger, new Date("2026-01-01T11:30:00Z"), now),
-    new Date("2026-01-01T12:30:00Z"),
-  );
-});
-
 test("日次スケジュール (UTC) は当日の実行時刻を判定する", () => {
   const trigger = dailyTrigger("09:00", "UTC");
   const before = new Date("2026-01-01T08:00:00Z");
@@ -131,10 +120,6 @@ test("nextDailyOccurrence は当日の時刻前なら当日を返す", () => {
   const now = new Date("2025-12-31T23:30:00Z");
   assert.deepEqual(
     nextDailyOccurrence(trigger, now),
-    new Date("2026-01-01T00:00:00Z"),
-  );
-  assert.deepEqual(
-    nextScheduleRun(trigger, new Date("2025-12-31T00:00:00Z"), now),
     new Date("2026-01-01T00:00:00Z"),
   );
 });

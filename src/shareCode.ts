@@ -14,6 +14,9 @@ import {
 export const SHARE_CODE_PREFIX = "FORGE1-";
 export const SHARE_CODE_VERSION = 1;
 const CHECKSUM_LENGTH = 8;
+// 展開後の JSON の上限。Blueprint の JSON は通常数 KB に収まるため
+// 1 MiB あれば十分で、zip bomb 的な入力でメモリを圧迫させない。
+const MAX_SHARE_CODE_JSON_BYTES = 1024 * 1024;
 
 export class ShareCodeError extends Error {
   constructor(message: string) {
@@ -75,7 +78,9 @@ export function decodeShareCode(code: string): Blueprint {
   }
   let json: string;
   try {
-    json = gunzipSync(payload).toString("utf-8");
+    json = gunzipSync(payload, {
+      maxOutputLength: MAX_SHARE_CODE_JSON_BYTES,
+    }).toString("utf-8");
   } catch {
     throw new ShareCodeError(
       "読み込みできませんでした。共有コードを展開できませんでした",
