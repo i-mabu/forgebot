@@ -3,9 +3,7 @@
   "projectOwner": "i-mabu",
   "repoType": "github",
   "repoHost": "https://github.com",
-  "files": [
-    "README.md"
-  ],
+  "files": ["README.md"],
   "imageSize": 100,
   "commit": false,
   "contributorsPerLine": 7,
@@ -15,9 +13,7 @@
       "name": "i-mabu",
       "avatar_url": "https://avatars.githubusercontent.com/u/356833989?v=4",
       "profile": "https://github.com/i-mabu",
-      "contributions": [
-        "code"
-      ]
+      "contributions": ["code"]
     }
   ]
 }
