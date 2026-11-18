@@ -28,13 +28,25 @@ export type Trigger =
 export type Condition =
   | { type: "always" }
   | { type: "variableEquals"; key: string; value: string }
-  | { type: "chance"; percent: number };
+  | { type: "chance"; percent: number }
+  | {
+      type: "plugin";
+      plugin: string;
+      block: string;
+      params: Record<string, unknown>;
+    };
 
 export type Action =
   | { type: "reply"; template: string }
   | { type: "sendToChannel"; channelId: string; template: string }
   | { type: "incrementCounter"; key: string; amount?: number }
-  | { type: "setVariable"; key: string; value: string };
+  | { type: "setVariable"; key: string; value: string }
+  | {
+      type: "plugin";
+      plugin: string;
+      block: string;
+      params: Record<string, unknown>;
+    };
 
 export interface Presentation {
   format?: "text" | "embed";
@@ -66,12 +78,18 @@ export const MAX_COOLDOWN_SECONDS = 86400;
 export const MAX_COUNTER_AMOUNT = 1000;
 export const GRAPHITE = 0x3a3f4a;
 
-const CONDITION_TYPES = new Set(["always", "variableEquals", "chance"]);
+const CONDITION_TYPES = new Set([
+  "always",
+  "variableEquals",
+  "chance",
+  "plugin",
+]);
 const ACTION_TYPES = new Set([
   "reply",
   "sendToChannel",
   "incrementCounter",
   "setVariable",
+  "plugin",
 ]);
 const DAILY_TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
 
@@ -218,6 +236,19 @@ function validateCondition(raw: unknown, index: number): Condition {
     }
     return { type: "variableEquals", key, value: raw.value };
   }
+  if (raw.type === "plugin") {
+    const plugin = requireKey(raw.plugin, "plugin", "plugin condition");
+    const block = requireKey(raw.block, "block", "plugin condition");
+    if (raw.params !== undefined && !isRecord(raw.params)) {
+      fail('plugin condition "params" must be an object');
+    }
+    return {
+      type: "plugin",
+      plugin,
+      block,
+      params: (raw.params as Record<string, unknown>) ?? {},
+    };
+  }
   const percent = raw.percent;
   if (
     typeof percent !== "number" ||
@@ -269,6 +300,19 @@ function validateAction(raw: unknown, index: number): Action {
       );
     }
     return { type: "incrementCounter", key, amount };
+  }
+  if (raw.type === "plugin") {
+    const plugin = requireKey(raw.plugin, "plugin", "plugin action");
+    const block = requireKey(raw.block, "block", "plugin action");
+    if (raw.params !== undefined && !isRecord(raw.params)) {
+      fail('plugin action "params" must be an object');
+    }
+    return {
+      type: "plugin",
+      plugin,
+      block,
+      params: (raw.params as Record<string, unknown>) ?? {},
+    };
   }
   const key = requireKey(raw.key, "key", "setVariable action");
   if (typeof raw.value !== "string") {

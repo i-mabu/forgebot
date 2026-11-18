@@ -4,6 +4,7 @@
 
 import type { Action, Blueprint, Condition } from "./blueprint.js";
 import { CooldownTracker, cooldownKey } from "./cooldown.js";
+import type { PluginRegistry } from "./plugins.js";
 import { renderTemplate } from "./render.js";
 import type { Store } from "./store.js";
 
@@ -42,6 +43,7 @@ export interface EngineDeps {
   cooldowns: CooldownTracker;
   globalDisabled: boolean;
   rng?: () => number;
+  plugins?: PluginRegistry;
 }
 
 // =============
@@ -57,6 +59,26 @@ export function evaluateCondition(
   if (condition.type === "chance") {
     const rng = deps.rng ?? Math.random;
     return rng() * 100 < condition.percent;
+  }
+  if (condition.type === "plugin") {
+    if (deps.plugins === undefined) return false;
+    if (!deps.store.isPluginEnabled(ctx.guildId, condition.plugin)) {
+      return false;
+    }
+    return deps.plugins.evaluateCondition(condition.plugin, condition.block, {
+      guildId: ctx.guildId,
+      userId: ctx.userId,
+      userName: ctx.userName,
+      serverName: ctx.serverName,
+      params: condition.params,
+      rng: deps.rng ?? Math.random,
+      getCounter: (key) => deps.store.getCounter(ctx.guildId, key),
+      getVariable: (key) =>
+        deps.store.getVariable(ctx.guildId, "user", ctx.userId, key) ??
+        deps.store.getVariable(ctx.guildId, "guild", "", key),
+      getMemory: (key) => deps.store.getApprovedMemory(ctx.guildId, key),
+      renderText: (template) => renderActionTemplate(template, deps, ctx),
+    });
   }
   // variableEquals はユーザー単位の値を優先し、無ければギルド単位へフォールバックする。
   const userValue = deps.store.getVariable(
@@ -92,6 +114,7 @@ function renderActionTemplate(
     getVariable: (key) =>
       deps.store.getVariable(ctx.guildId, "user", ctx.userId, key) ??
       deps.store.getVariable(ctx.guildId, "guild", "", key),
+    getMemory: (key) => deps.store.getApprovedMemory(ctx.guildId, key),
     rng: deps.rng,
   });
 }
@@ -134,6 +157,35 @@ function executeAction(
       amount,
       newValue,
     });
+    return;
+  }
+  if (action.type === "plugin") {
+    if (deps.plugins === undefined) return;
+    if (!deps.store.isPluginEnabled(ctx.guildId, action.plugin)) return;
+    const renderedParams: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(action.params)) {
+      renderedParams[k] =
+        typeof v === "string" ? renderActionTemplate(v, deps, ctx) : v;
+    }
+    const output = deps.plugins.executeAction(action.plugin, action.block, {
+      guildId: ctx.guildId,
+      userId: ctx.userId,
+      userName: ctx.userName,
+      serverName: ctx.serverName,
+      params: renderedParams,
+      rng: deps.rng ?? Math.random,
+      getCounter: (key) => deps.store.getCounter(ctx.guildId, key),
+      getVariable: (key) =>
+        deps.store.getVariable(ctx.guildId, "user", ctx.userId, key) ??
+        deps.store.getVariable(ctx.guildId, "guild", "", key),
+      getMemory: (key) => deps.store.getApprovedMemory(ctx.guildId, key),
+      renderText: (template) => renderActionTemplate(template, deps, ctx),
+    });
+    if (output !== null) {
+      const rendered = (blueprint.presentation?.prefix ?? "") + output;
+      outputs.push(rendered);
+      intended.push({ type: "reply", text: rendered });
+    }
     return;
   }
   deps.store.setVariable(

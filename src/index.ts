@@ -3,11 +3,13 @@
 // ===============
 
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { attachHandlers, createClient } from "./client.js";
 import { ConfigError, loadConfig } from "./config.js";
 import { CooldownTracker } from "./cooldown.js";
 import { DraftStore } from "./draft.js";
+import { createDefaultRegistry, loadPluginsFromDir } from "./plugins.js";
 import { Store } from "./store.js";
 
 // ===========
@@ -30,11 +32,30 @@ async function main(): Promise<void> {
   }
   const store = new Store(config.dbPath);
   const client = createClient();
+  const here = dirname(fileURLToPath(import.meta.url));
+  const registry = createDefaultRegistry();
+  for (const pluginsDir of [
+    join(here, "..", "plugins"),
+    join(here, "..", "..", "plugins"),
+  ]) {
+    const { result: pluginLoad } = await loadPluginsFromDir(
+      pluginsDir,
+      registry,
+    );
+    for (const name of pluginLoad.loaded) {
+      console.log(`Plugin loaded: ${name}`);
+    }
+    for (const error of pluginLoad.errors) {
+      console.warn(`Plugin load failed: ${error.name}: ${error.message}`);
+    }
+    if (pluginLoad.loaded.length > 0) break;
+  }
   const handlers = attachHandlers(client, {
     store,
     cooldowns: new CooldownTracker(),
     drafts: new DraftStore(),
     globalDisabled: config.disabled,
+    plugins: registry,
   });
 
   // ================

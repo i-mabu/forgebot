@@ -66,7 +66,11 @@ import {
   parseDraftCustomId,
 } from "./draft.js";
 import { executeBlueprint, type IntendedAction } from "./engine.js";
+import { getGalleryTemplate, listGalleryTemplates } from "./gallery.js";
+import { computeGrowthStage } from "./growth.js";
+import { validateMemoryProposal } from "./memory.js";
 import { hasManageGuild, MANAGE_GUILD_MISSING_MESSAGE } from "./permissions.js";
+import { createDefaultRegistry, type PluginRegistry } from "./plugins.js";
 import { matchesReactionTrigger, reactionCountFor } from "./reactionTrigger.js";
 import { RenderError } from "./render.js";
 import { isScheduleDue } from "./schedule.js";
@@ -82,6 +86,13 @@ export interface ClientDeps {
   cooldowns: CooldownTracker;
   drafts: DraftStore;
   globalDisabled: boolean;
+  plugins?: PluginRegistry;
+}
+
+const defaultPlugins: PluginRegistry = createDefaultRegistry();
+
+function pluginsOf(deps: ClientDeps): PluginRegistry {
+  return deps.plugins ?? defaultPlugins;
 }
 
 const MODAL_CREATE_ID = "forge:modal:create";
@@ -164,6 +175,143 @@ export function buildCommands(): RESTPostAPIChatInputApplicationCommandsJSONBody
       sub
         .setName("import")
         .setDescription("共有コードから Blueprint を読み込む"),
+    )
+    .addSubcommandGroup((group) =>
+      group
+        .setName("memory")
+        .setDescription("サーバーの記憶を管理する")
+        .addSubcommand((sub) =>
+          sub
+            .setName("propose")
+            .setDescription("記憶の候補を登録する")
+            .addStringOption((o) =>
+              o.setName("key").setDescription("キー").setRequired(true),
+            )
+            .addStringOption((o) =>
+              o
+                .setName("kind")
+                .setDescription("種別")
+                .setRequired(true)
+                .addChoices(
+                  { name: "名言", value: "quote" },
+                  { name: "記念日", value: "anniversary" },
+                  { name: "メモ", value: "note" },
+                ),
+            )
+            .addStringOption((o) =>
+              o.setName("content").setDescription("内容").setRequired(true),
+            ),
+        )
+        .addSubcommand((sub) =>
+          sub
+            .setName("list")
+            .setDescription("記憶の一覧を表示する")
+            .addStringOption((o) =>
+              o
+                .setName("status")
+                .setDescription("承認状態")
+                .setRequired(false)
+                .addChoices(
+                  { name: "pending", value: "pending" },
+                  { name: "approved", value: "approved" },
+                  { name: "rejected", value: "rejected" },
+                ),
+            ),
+        )
+        .addSubcommand((sub) =>
+          sub
+            .setName("approve")
+            .setDescription("記憶の候補を承認する")
+            .addStringOption((o) =>
+              o
+                .setName("key")
+                .setDescription("キー")
+                .setRequired(true)
+                .setAutocomplete(true),
+            ),
+        )
+        .addSubcommand((sub) =>
+          sub
+            .setName("reject")
+            .setDescription("記憶の候補を却下する")
+            .addStringOption((o) =>
+              o
+                .setName("key")
+                .setDescription("キー")
+                .setRequired(true)
+                .setAutocomplete(true),
+            ),
+        )
+        .addSubcommand((sub) =>
+          sub
+            .setName("delete")
+            .setDescription("記憶を削除する")
+            .addStringOption((o) =>
+              o
+                .setName("key")
+                .setDescription("キー")
+                .setRequired(true)
+                .setAutocomplete(true),
+            ),
+        ),
+    )
+    .addSubcommandGroup((group) =>
+      group
+        .setName("plugin")
+        .setDescription("プラグインを管理する")
+        .addSubcommand((sub) =>
+          sub.setName("list").setDescription("プラグインの一覧を表示する"),
+        )
+        .addSubcommand((sub) =>
+          sub
+            .setName("enable")
+            .setDescription("プラグインを有効化する")
+            .addStringOption((o) =>
+              o
+                .setName("name")
+                .setDescription("プラグイン名")
+                .setRequired(true)
+                .setAutocomplete(true),
+            ),
+        )
+        .addSubcommand((sub) =>
+          sub
+            .setName("disable")
+            .setDescription("プラグインを無効化する")
+            .addStringOption((o) =>
+              o
+                .setName("name")
+                .setDescription("プラグイン名")
+                .setRequired(true)
+                .setAutocomplete(true),
+            ),
+        ),
+    )
+    .addSubcommandGroup((group) =>
+      group
+        .setName("template")
+        .setDescription("公式テンプレートを使う")
+        .addSubcommand((sub) =>
+          sub.setName("list").setDescription("テンプレートの一覧を表示する"),
+        )
+        .addSubcommand((sub) =>
+          sub
+            .setName("use")
+            .setDescription("テンプレートを取り込む")
+            .addStringOption((o) =>
+              o
+                .setName("id")
+                .setDescription("テンプレート ID")
+                .setRequired(true)
+                .setAutocomplete(true),
+            )
+            .addStringOption((o) =>
+              o
+                .setName("name")
+                .setDescription("新しい名前 (任意)")
+                .setRequired(false),
+            ),
+        ),
     )
     .addSubcommandGroup((group) =>
       group
@@ -468,14 +616,253 @@ async function handleStatus(
   deps: ClientDeps,
 ): Promise<void> {
   if (!(await requireManageGuild(interaction))) return;
-  const counts = deps.store.getCounts(interaction.guildId ?? "");
+  const guildId = interaction.guildId ?? "";
+  const counts = deps.store.getCounts(guildId);
+  const growthRecord = deps.store.getGrowthRecord(guildId);
+  const growth = computeGrowthStage(
+    growthRecord?.totalExecutions ?? counts.executions,
+    growthRecord?.activeDays ?? 0,
+  );
   await interaction.reply({
     content: [
       `Blueprint: ${counts.blueprints}`,
       `Variable: ${counts.variables}`,
       `Counter: ${counts.counters}`,
       `実行総数: ${counts.executions}`,
+      `記憶: ${deps.store.countMemories(guildId, "approved")} 件 (候補 ${deps.store.countMemories(guildId, "pending")} 件)`,
+      `親密度: 段階 ${growth.level} (${growth.label}) / 稼働 ${growth.activeDays} 日`,
+      `プラグイン: ${deps.store.listPluginInstalls(guildId).filter((p) => p.enabled).length} 件有効`,
     ].join("\n"),
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+// ============================
+// 6.1 記憶・プラグイン・テンプレート
+// ============================
+
+async function handleMemoryPropose(
+  interaction: ChatInputCommandInteraction,
+  deps: ClientDeps,
+): Promise<void> {
+  const guildId = interaction.guildId ?? "";
+  const validated = validateMemoryProposal({
+    key: interaction.options.getString("key", true),
+    kind: interaction.options.getString("kind", true),
+    content: interaction.options.getString("content", true),
+  });
+  if (!validated.ok) {
+    await interaction.reply({
+      content: `登録できませんでした。${validated.message}`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  const record = deps.store.proposeMemory(guildId, {
+    ...validated.value,
+    createdBy: interaction.user.id,
+  });
+  await interaction.reply({
+    content: `候補を登録しました: ${record.key}`,
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+async function handleMemoryList(
+  interaction: ChatInputCommandInteraction,
+  deps: ClientDeps,
+): Promise<void> {
+  const guildId = interaction.guildId ?? "";
+  const statusRaw = interaction.options.getString("status");
+  const status =
+    statusRaw === "pending" ||
+    statusRaw === "approved" ||
+    statusRaw === "rejected"
+      ? statusRaw
+      : undefined;
+  const memories = deps.store.listMemories(guildId, status);
+  if (memories.length === 0) {
+    await interaction.reply({
+      content: "記憶: 0 件",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  const lines = memories
+    .slice(0, LIST_DISPLAY_LIMIT)
+    .map((m, i) => `${i + 1}. ${m.key}: [${m.kind}/${m.status}] ${m.content}`);
+  await interaction.reply({
+    content: [`記憶一覧: ${memories.length} 件`, ...lines].join("\n"),
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+async function handleMemoryApprove(
+  interaction: ChatInputCommandInteraction,
+  deps: ClientDeps,
+): Promise<void> {
+  const guildId = interaction.guildId ?? "";
+  const key = interaction.options.getString("key", true).trim().toLowerCase();
+  const ok = deps.store.approveMemory(guildId, key, interaction.user.id);
+  await interaction.reply({
+    content: ok ? `承認しました: ${key}` : `見つかりませんでした: ${key}`,
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+async function handleMemoryReject(
+  interaction: ChatInputCommandInteraction,
+  deps: ClientDeps,
+): Promise<void> {
+  const guildId = interaction.guildId ?? "";
+  const key = interaction.options.getString("key", true).trim().toLowerCase();
+  const ok = deps.store.rejectMemory(guildId, key);
+  await interaction.reply({
+    content: ok ? `却下しました: ${key}` : `見つかりませんでした: ${key}`,
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+async function handleMemoryDelete(
+  interaction: ChatInputCommandInteraction,
+  deps: ClientDeps,
+): Promise<void> {
+  const guildId = interaction.guildId ?? "";
+  const key = interaction.options.getString("key", true).trim().toLowerCase();
+  const ok = deps.store.deleteMemory(guildId, key);
+  await interaction.reply({
+    content: ok ? `削除しました: ${key}` : `見つかりませんでした: ${key}`,
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+async function handlePluginList(
+  interaction: ChatInputCommandInteraction,
+  deps: ClientDeps,
+): Promise<void> {
+  const guildId = interaction.guildId ?? "";
+  const plugins = pluginsOf(deps).list();
+  if (plugins.length === 0) {
+    await interaction.reply({
+      content: "プラグイン: 0 件",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  const lines = plugins.map((p, i) => {
+    const enabled = deps.store.isPluginEnabled(guildId, p.manifest.name);
+    const blocks = [
+      ...p.manifest.provides.conditions.map((c) => `条件:${c}`),
+      ...p.manifest.provides.actions.map((a) => `アクション:${a}`),
+    ].join(", ");
+    return `${i + 1}. ${p.manifest.name}: ${enabled ? "有効" : "無効"} (${blocks})`;
+  });
+  await interaction.reply({
+    content: [`プラグイン一覧: ${plugins.length} 件`, ...lines].join("\n"),
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+async function handlePluginSetEnabled(
+  interaction: ChatInputCommandInteraction,
+  deps: ClientDeps,
+  enabled: boolean,
+): Promise<void> {
+  const guildId = interaction.guildId ?? "";
+  const name = interaction.options.getString("name", true);
+  if (pluginsOf(deps).get(name) === null) {
+    await interaction.reply({
+      content: `見つかりませんでした: ${name}`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  deps.store.setPluginEnabled(guildId, name, enabled);
+  await interaction.reply({
+    content: enabled ? `有効化しました: ${name}` : `無効化しました: ${name}`,
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+async function handleTemplateList(
+  interaction: ChatInputCommandInteraction,
+): Promise<void> {
+  const templates = listGalleryTemplates();
+  const lines = templates.map(
+    (t, i) => `${i + 1}. ${t.id}: ${t.name} - ${t.description}`,
+  );
+  await interaction.reply({
+    content: [`テンプレート一覧: ${templates.length} 件`, ...lines].join("\n"),
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+async function handleTemplateUse(
+  interaction: ChatInputCommandInteraction,
+  deps: ClientDeps,
+): Promise<void> {
+  const guildId = interaction.guildId ?? "";
+  const id = interaction.options.getString("id", true);
+  const template = getGalleryTemplate(id);
+  if (template === null) {
+    await interaction.reply({
+      content: `見つかりませんでした: ${id}`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  const newNameRaw = interaction.options.getString("name");
+  let blueprint: Blueprint = template.blueprint;
+  if (newNameRaw !== null && newNameRaw.trim() !== "") {
+    const validated = validateCommandName(newNameRaw);
+    if (!validated.ok) {
+      await interaction.reply({
+        content: validated.message,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    blueprint = {
+      ...blueprint,
+      name: validated.value,
+      trigger:
+        blueprint.trigger.type === "slash"
+          ? { type: "slash", command: validated.value }
+          : blueprint.trigger,
+    };
+  }
+  if (getAutomationChannelId(blueprint) !== null) {
+    const session = deps.drafts.put(guildId, interaction.user.id, {
+      kind: "importChannel",
+      blueprint,
+    });
+    await interaction.reply({
+      content: `送信先チャンネルを選択してください: ${blueprint.name}`,
+      components: [
+        buildChannelSelectRow(`${SELECT_IMPORT_CHANNEL_PREFIX}${session.id}`),
+      ],
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  // ChatInput からは presentBlueprintDraft の対象型に合わないため、
+  // プレビューなしで直接保存せず、共有コード取り込みと同じ確認経路を
+  // 使えない場合は保存前にチェックだけ行い下書きボタンを提示する。
+  const check = checkBlueprintCreation(deps.store, guildId, blueprint);
+  if (!check.ok) {
+    await interaction.reply({
+      content: check.message,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  const session = deps.drafts.put(guildId, interaction.user.id, {
+    kind: "create",
+    blueprint,
+  });
+  await interaction.reply({
+    content: `テンプレート: ${template.id} (${blueprint.name})`,
+    components: [buildDraftButtons(session.id, "保存", ButtonStyle.Primary)],
     flags: MessageFlags.Ephemeral,
   });
 }
@@ -723,6 +1110,7 @@ async function presentBlueprintDraft(
       reactionCount:
         blueprint.trigger.type === "reaction" ? blueprint.trigger.threshold : 0,
       getCounter: (key) => deps.store.getCounter(guildId, key),
+      getMemory: (key) => deps.store.getApprovedMemory(guildId, key),
     });
   } catch (error) {
     if (error instanceof RenderError) {
@@ -1100,9 +1488,30 @@ async function handleAutocomplete(
     return;
   }
   const focused = interaction.options.getFocused().toLowerCase();
-  const choices = deps.store
-    .listBlueprints(interaction.guildId)
-    .map((blueprint) => blueprint.name)
+  let group: string | null = null;
+  let sub: string | null = null;
+  try {
+    group = interaction.options.getSubcommandGroup(false);
+    sub = interaction.options.getSubcommand(false);
+  } catch {
+    group = null;
+    sub = null;
+  }
+  let candidates: string[];
+  if (group === "memory") {
+    candidates = deps.store.listMemories(interaction.guildId).map((m) => m.key);
+  } else if (group === "plugin") {
+    candidates = pluginsOf(deps)
+      .list()
+      .map((p) => p.manifest.name);
+  } else if (group === "template" && sub === "use") {
+    candidates = listGalleryTemplates().map((t) => t.id);
+  } else {
+    candidates = deps.store
+      .listBlueprints(interaction.guildId)
+      .map((blueprint) => blueprint.name);
+  }
+  const choices = candidates
     .filter((name) => name.toLowerCase().includes(focused))
     .slice(0, 25)
     .map((name) => ({ name, value: name }));
@@ -1127,12 +1536,16 @@ async function handleRun(
     });
     return;
   }
-  const result = executeBlueprint(blueprint, deps, {
-    guildId,
-    userId: interaction.user.id,
-    userName: interaction.user.username,
-    serverName: interaction.guild?.name ?? "",
-  });
+  const result = executeBlueprint(
+    blueprint,
+    { ...deps, plugins: pluginsOf(deps) },
+    {
+      guildId,
+      userId: interaction.user.id,
+      userName: interaction.user.username,
+      serverName: interaction.guild?.name ?? "",
+    },
+  );
   if (result.status === "blocked") {
     const message =
       result.reason === "cooldown"
@@ -1304,14 +1717,18 @@ async function handleReactionAdd(
         ),
       };
       if (!matchesReactionTrigger(trigger, input)) continue;
-      const result = executeBlueprint(blueprint, deps, {
-        guildId,
-        userId: author.id,
-        userName: author.username,
-        serverName: guild.name,
-        messageUrl: message.url,
-        reactionCount: reactionCountFor(trigger, input),
-      });
+      const result = executeBlueprint(
+        blueprint,
+        { ...deps, plugins: pluginsOf(deps) },
+        {
+          guildId,
+          userId: author.id,
+          userName: author.username,
+          serverName: guild.name,
+          messageUrl: message.url,
+          reactionCount: reactionCountFor(trigger, input),
+        },
+      );
       if (result.status !== "ok") continue;
       // 送信前に発火を記録して先取りする。同時に届いたリアクションで
       // 二重に送信しないよう、記録できなかった場合はここで止める。
@@ -1367,12 +1784,16 @@ export function startScheduler(
         if (!isScheduleDue(blueprint.trigger, lastRun, now)) continue;
         const guild = client.guilds.cache.get(guildId);
         if (guild === undefined) continue;
-        const result = executeBlueprint(blueprint, deps, {
-          guildId,
-          userId: "",
-          userName: client.user?.username ?? "FORGE",
-          serverName: guild.name,
-        });
+        const result = executeBlueprint(
+          blueprint,
+          { ...deps, plugins: pluginsOf(deps) },
+          {
+            guildId,
+            userId: "",
+            userName: client.user?.username ?? "FORGE",
+            serverName: guild.name,
+          },
+        );
         if (result.status !== "ok") continue;
         // 送信より先に最終実行時刻を記録する。送信の成否にかかわらず、
         // 次回の tick や再起動で同じ回を二重に発火させないため。
@@ -1464,6 +1885,32 @@ export function attachHandlers(
           if (sub === "delete") {
             await handleDataDeleteCommand(interaction, deps);
           }
+          return;
+        }
+        if (group === "memory") {
+          if (!(await requireManageGuild(interaction))) return;
+          if (sub === "propose") await handleMemoryPropose(interaction, deps);
+          if (sub === "list") await handleMemoryList(interaction, deps);
+          if (sub === "approve") await handleMemoryApprove(interaction, deps);
+          if (sub === "reject") await handleMemoryReject(interaction, deps);
+          if (sub === "delete") await handleMemoryDelete(interaction, deps);
+          return;
+        }
+        if (group === "plugin") {
+          if (!(await requireManageGuild(interaction))) return;
+          if (sub === "list") await handlePluginList(interaction, deps);
+          if (sub === "enable") {
+            await handlePluginSetEnabled(interaction, deps, true);
+          }
+          if (sub === "disable") {
+            await handlePluginSetEnabled(interaction, deps, false);
+          }
+          return;
+        }
+        if (group === "template") {
+          if (!(await requireManageGuild(interaction))) return;
+          if (sub === "list") await handleTemplateList(interaction);
+          if (sub === "use") await handleTemplateUse(interaction, deps);
           return;
         }
         if (sub === "status") {

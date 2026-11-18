@@ -203,6 +203,7 @@ export interface PreviewContext {
   messageUrl?: string;
   reactionCount?: number;
   getCounter: (key: string) => number;
+  getMemory?: (key: string) => string | null;
 }
 
 // 保存前に見せる描画サンプル。カウンター加算は加算後の値で描画し、
@@ -227,6 +228,7 @@ export function renderBlueprintPreview(
         reactionCount: ctx.reactionCount,
         getCounter: (key) => ctx.getCounter(key) + (offsets.get(key) ?? 0),
         getVariable: () => null,
+        getMemory: ctx.getMemory ?? (() => null),
       });
       outputs.push((blueprint.presentation?.prefix ?? "") + text);
     }
