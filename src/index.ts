@@ -11,6 +11,7 @@ import { CooldownTracker } from "./cooldown.js";
 import { DraftStore } from "./draft.js";
 import { createDefaultRegistry, loadPluginsFromDir } from "./plugins.js";
 import { Store } from "./store.js";
+import { attachReadyWatchdog } from "./watchdog.js";
 
 // ===========
 // 2. 起動処理
@@ -32,6 +33,8 @@ async function main(): Promise<void> {
   }
   const store = new Store(config.dbPath);
   const client = createClient();
+  // Gateway安全構造: READY が来ないサイレント停滞を検知して終了する (watchdog.ts)
+  attachReadyWatchdog(client);
   const here = dirname(fileURLToPath(import.meta.url));
   const registry = createDefaultRegistry();
   for (const pluginsDir of [
